@@ -1,0 +1,237 @@
+//@version=5
+strategy("BTC 5min Momentum Scalp | EMA 5/13/34",
+     shorttitle        = "BTC Scalp v2",
+     overlay           = true,
+     initial_capital   = 10000,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 5,
+     pyramiding        = 0,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.02,   // 진입 0%(maker) + SL 0.04%(taker) 혼합 근사값
+     slippage          = 0,
+     process_orders_on_close = true)
+
+// ═══════════════════════════════════════════════════════════════
+//  입력 파라미터
+// ═══════════════════════════════════════════════════════════════
+
+// 지표
+emaFast      = input.int  (5,    "EMA Fast",           group="📊 지표")
+emaMid       = input.int  (13,   "EMA Mid",            group="📊 지표")
+emaSlow      = input.int  (34,   "EMA Slow",           group="📊 지표")
+rsiPeriod    = input.int  (14,   "RSI 기간",           group="📊 지표")
+atrPeriod    = input.int  (14,   "ATR 기간",           group="📊 지표")
+volMAPeriod  = input.int  (20,   "Volume MA 기간",     group="📊 지표")
+atrMedianLen = input.int  (50,   "ATR 중앙값 기간",    group="📊 지표")
+
+// 시그널 조건
+rsiLongMin   = input.int  (35,   "RSI Long 하한",          group="🎯 시그널 조건")
+rsiLongMax   = input.int  (70,   "RSI Long 상한",          group="🎯 시그널 조건")
+rsiShortMin  = input.int  (40,   "RSI Short 하한",         group="🎯 시그널 조건")
+rsiShortMax  = input.int  (60,   "RSI Short 상한",         group="🎯 시그널 조건")
+volThreshold = input.float(1.0,  "거래량 배수 (×MA20)",    group="🎯 시그널 조건", step=0.1)
+atrMult      = input.float(1.5,  "ATR 신호 배수 (×중앙값)", group="🎯 시그널 조건", step=0.1)
+
+// 리스크 관리
+slMult    = input.float(1.2, "SL ATR 배수",           group="⚠️ 리스크 관리", step=0.1)
+tpMult    = input.float(3.0, "TP ATR 배수",           group="⚠️ 리스크 관리", step=0.1)
+trailBE   = input.float(1.0, "Trailing BE 발동 (R)",  group="⚠️ 리스크 관리", step=0.1)
+trailStep = input.float(1.5, "Trailing Step 발동 (R)", group="⚠️ 리스크 관리", step=0.1)
+
+// 필터
+useWeekendFilter = input.bool(true, "주말 필터 (토~일 06:00 UTC)", group="🚫 필터")
+
+// 시각화
+showSLTP  = input.bool(true, "SL/TP 라인 표시", group="👁 시각화")
+showBG    = input.bool(true, "포지션 배경색",    group="👁 시각화")
+
+
+// ═══════════════════════════════════════════════════════════════
+//  지표 계산
+// ═══════════════════════════════════════════════════════════════
+
+ema_f = ta.ema(close, emaFast)
+ema_m = ta.ema(close, emaMid)
+ema_s = ta.ema(close, emaSlow)
+
+rsi = ta.rsi(close, rsiPeriod)
+
+// VWAP: 일별 리셋 (Pine Script ta.vwap은 세션 기준 자동 리셋)
+vwap_val = ta.vwap(hlc3)
+
+// ATR + 50봉 중앙값
+atr       = ta.atr(atrPeriod)
+atrMedian = ta.percentile_linear_interpolation(atr, atrMedianLen, 50)
+
+// 거래량 비율
+volMA    = ta.sma(volume, volMAPeriod)
+volRatio = volume / volMA
+
+
+// ═══════════════════════════════════════════════════════════════
+//  필터
+// ═══════════════════════════════════════════════════════════════
+
+// 주말 필터 (UTC 기준 / 거래소 타임존에 따라 조정 필요)
+isSaturday = dayofweek == dayofweek.saturday
+isSundayMorning = dayofweek == dayofweek.sunday and hour < 6
+isWeekend = useWeekendFilter and (isSaturday or isSundayMorning)
+
+isFiltered = isWeekend
+
+
+// ═══════════════════════════════════════════════════════════════
+//  매매 시그널
+// ═══════════════════════════════════════════════════════════════
+
+// 공통 필터 조건
+volOK = volRatio > volThreshold
+atrOK = not na(atrMedian) and atr > atrMedian * atrMult
+noPos = strategy.position_size == 0
+
+// ── LONG 6가지 조건 ──────────────────────────────────────────
+longTrend = ema_f > ema_m and ema_m > ema_s          // 1. 정배열
+longVWAP  = close > vwap_val                          // 2. VWAP 위
+longRSI   = rsi >= rsiLongMin and rsi <= rsiLongMax   // 3. RSI 범위
+           and rsi > rsi[1]                           //    RSI 상승 중
+longBreak = close > ema_f and close[1] <= ema_f[1]   // 4. EMA Fast 상향 돌파
+
+longSignal = not isFiltered and noPos
+           and longTrend and longVWAP and longRSI and longBreak
+           and volOK and atrOK
+
+// ── SHORT 6가지 조건 ─────────────────────────────────────────
+shortTrend = ema_f < ema_m and ema_m < ema_s          // 1. 역배열
+shortVWAP  = close < vwap_val                          // 2. VWAP 아래
+shortRSI   = rsi >= rsiShortMin and rsi <= rsiShortMax // 3. RSI 범위
+            and rsi < rsi[1]                           //    RSI 하락 중
+shortBreak = close < ema_f and close[1] >= ema_f[1]   // 4. EMA Fast 하향 이탈
+
+shortSignal = not isFiltered and noPos
+            and shortTrend and shortVWAP and shortRSI and shortBreak
+            and volOK and atrOK
+
+
+// ═══════════════════════════════════════════════════════════════
+//  포지션 관리 & 트레일링 스탑
+// ═══════════════════════════════════════════════════════════════
+
+var float entryAtr   = na   // 진입 시점 ATR (SL 거리 기준값)
+var float entrySL    = na   // 초기 손절가
+var float entryTP    = na   // 익절가
+var float currentSL  = na   // 현재 손절가 (트레일링으로 업데이트)
+var int   trailState = 0    // 0=초기, 1=BE 이동됨, 2=+0.5R 이동됨
+
+// ── 진입 ─────────────────────────────────────────────────────
+if longSignal
+    entryAtr   := atr
+    entrySL    := close - atr * slMult
+    entryTP    := close + atr * tpMult
+    currentSL  := close - atr * slMult
+    trailState := 0
+    strategy.entry("Long", strategy.long)
+
+if shortSignal
+    entryAtr   := atr
+    entrySL    := close + atr * slMult
+    entryTP    := close - atr * tpMult
+    currentSL  := close + atr * slMult
+    trailState := 0
+    strategy.entry("Short", strategy.short)
+
+// ── 트레일링 스탑 업데이트 (봉 종가 기준) ────────────────────
+if strategy.position_size > 0  // LONG 보유 중
+    ep    = strategy.position_avg_price
+    rUnit = entryAtr * slMult          // 1R = SL 거리
+    currR = (close - ep) / rUnit       // 현재 수익 (R 단위)
+
+    if trailState == 0 and currR >= trailBE
+        // 1R 도달 → BE(진입가)로 SL 이동
+        currentSL  := ep
+        trailState := 1
+
+    if trailState == 1 and currR >= trailStep
+        // 1.5R 도달 → +0.5R로 SL 이동
+        currentSL  := ep + rUnit * 0.5
+        trailState := 2
+
+if strategy.position_size < 0  // SHORT 보유 중
+    ep    = strategy.position_avg_price
+    rUnit = entryAtr * slMult
+    currR = (ep - close) / rUnit
+
+    if trailState == 0 and currR >= trailBE
+        currentSL  := ep
+        trailState := 1
+
+    if trailState == 1 and currR >= trailStep
+        currentSL  := ep - rUnit * 0.5
+        trailState := 2
+
+// ── 청산 주문 (매 봉 업데이트) ───────────────────────────────
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long",
+         stop  = currentSL,
+         limit = entryTP,
+         comment_loss = "SL",
+         comment_profit = "TP")
+
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short",
+         stop  = currentSL,
+         limit = entryTP,
+         comment_loss = "SL",
+         comment_profit = "TP")
+
+
+// ═══════════════════════════════════════════════════════════════
+//  시각화
+// ═══════════════════════════════════════════════════════════════
+
+// EMA 라인
+plot(ema_f, "EMA 5",  color=color.new(color.yellow, 0), linewidth=1)
+plot(ema_m, "EMA 13", color=color.new(color.orange, 0), linewidth=1)
+plot(ema_s, "EMA 34", color=color.new(color.red,    0), linewidth=2)
+
+// VWAP
+plot(vwap_val, "VWAP", color=color.new(color.aqua, 20), linewidth=1, style=plot.style_stepline)
+
+// SL / TP 라인
+plot(showSLTP and strategy.position_size != 0 ? currentSL : na,
+     "SL", color=color.new(color.red,   0), linewidth=1, style=plot.style_linebr)
+plot(showSLTP and strategy.position_size != 0 ? entryTP : na,
+     "TP", color=color.new(color.lime,  0), linewidth=1, style=plot.style_linebr)
+
+// 진입가 라인
+plot(strategy.position_size != 0 ? strategy.position_avg_price : na,
+     "Entry", color=color.new(color.white, 50), linewidth=1, style=plot.style_linebr)
+
+// 시그널 마커
+plotshape(longSignal,  title="Long  시그널", style=shape.triangleup,
+     location=location.belowbar, color=color.lime,  size=size.small, text="L")
+plotshape(shortSignal, title="Short 시그널", style=shape.triangledown,
+     location=location.abovebar, color=color.red,   size=size.small, text="S")
+
+// 포지션 배경색
+bgcolor(showBG and strategy.position_size > 0 ? color.new(color.green, 90) :
+        showBG and strategy.position_size < 0 ? color.new(color.red,   90) : na,
+        title="포지션 배경")
+
+// 정보 테이블
+var table infoTable = table.new(position.top_right, 2, 5,
+     bgcolor=color.new(color.black, 70), border_width=1)
+if barstate.islast
+    table.cell(infoTable, 0, 0, "파라미터",   text_color=color.gray,  text_size=size.small)
+    table.cell(infoTable, 1, 0, "값",          text_color=color.gray,  text_size=size.small)
+    table.cell(infoTable, 0, 1, "EMA",         text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 1, str.tostring(emaFast) + "/" + str.tostring(emaMid) + "/" + str.tostring(emaSlow),
+               text_color=color.yellow, text_size=size.small)
+    table.cell(infoTable, 0, 2, "ATR 배수",   text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 2, str.tostring(atrMult),
+               text_color=color.orange, text_size=size.small)
+    table.cell(infoTable, 0, 3, "SL / TP",    text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 3, str.tostring(slMult) + "R / " + str.tostring(tpMult) + "R",
+               text_color=color.aqua,   text_size=size.small)
+    table.cell(infoTable, 0, 4, "Vol 배수",   text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 4, str.tostring(volThreshold) + "×",
+               text_color=color.lime,   text_size=size.small)

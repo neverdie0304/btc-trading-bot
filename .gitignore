@@ -1,0 +1,39 @@
+# Environment
+.env
+venv/
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# IDE
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Data cache
+data/cache/
+
+# Generated outputs
+*.html
+charts_5m/
+visualise/
+
+# Optimization results
+*.csv
+
+# Logs
+*.log
+data/*.log
+
+# Test cache
+.pytest_cache/
+.coverage
+htmlcov/
