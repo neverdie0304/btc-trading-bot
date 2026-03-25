@@ -61,7 +61,7 @@ class TradeLogger:
         self._conn = sqlite3.connect(str(self.db_path))
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
-        logger.info("TradeLogger 초기화: %s", self.db_path)
+        logger.info("TradeLogger initialized: %s", self.db_path)
 
     def _init_schema(self) -> None:
         """테이블이 없으면 생성한다."""
@@ -71,7 +71,7 @@ class TradeLogger:
             self._conn.execute("SELECT symbol FROM trades LIMIT 1")
         except sqlite3.OperationalError:
             self._conn.execute("ALTER TABLE trades ADD COLUMN symbol TEXT DEFAULT ''")
-            logger.info("trades 테이블에 symbol 컬럼 추가")
+            logger.info("Added symbol column to trades table")
         self._conn.commit()
 
     def log_trade(
@@ -107,7 +107,7 @@ class TradeLogger:
             ),
         )
         self._conn.commit()
-        logger.info("거래 기록: %s %s %s @ %.2f, PnL=%.2f", symbol, direction, exit_reason or "OPEN", entry_price, pnl or 0)
+        logger.info("Trade logged: %s %s %s @ %.2f, PnL=%.2f", symbol, direction, exit_reason or "OPEN", entry_price, pnl or 0)
         return cur.lastrowid
 
     def update_trade_exit(
@@ -189,6 +189,13 @@ class TradeLogger:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         rows = self._conn.execute(
             "SELECT * FROM trades WHERE date(timestamp) = ?", (today,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_trades_by_date(self, date_str: str) -> list[dict]:
+        """특정 날짜의 거래 목록을 반환한다."""
+        rows = self._conn.execute(
+            "SELECT * FROM trades WHERE date(timestamp) = ?", (date_str,)
         ).fetchall()
         return [dict(r) for r in rows]
 

@@ -13,7 +13,7 @@ BINANCE_API_SECRET: str = os.getenv("BINANCE_API_SECRET", "")
 
 SETTINGS: dict = {
     # 거래 페어
-    "symbol": "BTCUSDT",
+    "symbol": "BTCUSDC",
     "interval": "5m",
 
     # 지표 파라미터 (실측 최적: EMA 5/13/34, vol=1.0 atr=1.5 조합 최고 수익)
@@ -34,13 +34,13 @@ SETTINGS: dict = {
     "deadzone_atr_ratio": 0.5,
     "atr_signal_multiplier": 1.5,
 
-    # 리스크 관리 (SL=1.2 TP=3.0 / BE=1.0 STEP=1.5 / risk=5% lev=20x)
+    # 리스크 관리 (SL=1.2 TP=3.6 → 1:3R / 트레일링 OFF / risk=5% lev=20x)
     "leverage": 20,
     "risk_per_trade": 0.05,
     "sl_atr_multiplier": 1.2,
-    "tp_atr_multiplier": 3.0,
-    "trailing_be_threshold": 1.0,
-    "trailing_step_threshold": 1.5,
+    "tp_atr_multiplier": 3.6,
+    "trailing_be_threshold": 9999,
+    "trailing_step_threshold": 9999,
     "max_concurrent_positions": 1,
     "reverse_on_opposite_signal": False,
 
@@ -50,19 +50,19 @@ SETTINGS: dict = {
     "partial_tp_fraction": 0.75,     # 첫 TP에서 익절할 비율 (75%)
     "final_tp_r": 4.0,               # 잔여 물량 최종 TP (R 단위)
 
-    # 비용 (USDC-M: maker 0%, taker 0.05%)
-    "maker_fee": 0.0000,           # limit order (진입, TP 청산) 0%
-    "taker_fee": 0.0004,           # stop-market (SL 청산) 0.04%
+    # 비용 (USDT-M: maker 0.02%, taker 0.05%)
+    "maker_fee": 0.0002,           # limit order (진입, TP 청산) 0.02%
+    "taker_fee": 0.0005,           # stop-market (SL 청산) 0.05%
     "slippage_rate": 0.0000,
 
     # 필터
     "daily_max_losses": 0,          # 하루 N회 손절 시 당일 매매 중단 (0=무제한)
     "daily_max_trades": 0,           # 하루 최대 매매 횟수 (0=무제한)
-    "cooldown_after_consecutive_losses": 3,
-    "cooldown_candles": 12,
-    "weekend_filter": True,
+    "cooldown_after_consecutive_losses": 0,
+    "cooldown_candles": 0,
+    "weekend_filter": False,
     "news_blackout_minutes": 30,
-    "bad_hours_utc": [3, 5, 10, 12, 16, 19, 21],
+    "bad_hours_utc": [],
 
     # 뉴스 블랙아웃 날짜 (UTC, 수동 등록)
     "news_events": [],

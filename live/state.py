@@ -69,7 +69,7 @@ class LiveState:
         """일일 통계를 초기화한다."""
         self.daily_pnl = 0.0
         self.trades_today = []
-        logger.info("일일 통계 초기화")
+        logger.info("Daily stats reset")
 
     def record_win(self) -> None:
         """승리 기록."""
@@ -122,7 +122,7 @@ class LiveState:
 
         key = f"live_state:{self.symbol}" if self.symbol else "live_state"
         db.save_state(key, json.dumps(state_dict))
-        logger.debug("상태 저장 완료: %s", key)
+        logger.debug("State saved: %s", key)
 
     @classmethod
     def restore_from_db(cls, db: TradeLogger, symbol: str = "") -> "LiveState | None":
@@ -135,7 +135,7 @@ class LiveState:
         try:
             d = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
-            logger.warning("상태 복원 실패: 유효하지 않은 JSON")
+            logger.warning("State restore failed: invalid JSON")
             return None
 
         state = cls(
@@ -171,12 +171,12 @@ class LiveState:
             state.tp_order_id = d.get("tp_order_id")
             state.partial_tp_order_id = d.get("partial_tp_order_id")
             logger.info(
-                "포지션 복원: %s @ %.2f, SL=%.2f, TP=%.2f",
+                "Position restored: %s @ %.2f, SL=%.2f, TP=%.2f",
                 state.position.direction.value,
                 state.position.entry_price,
                 state.position.sl_price,
                 state.position.tp_price,
             )
 
-        logger.info("상태 복원 완료: balance=%.2f, candles=%d", state.balance, state.candle_count)
+        logger.info("State restored: balance=%.2f, candles=%d", state.balance, state.candle_count)
         return state

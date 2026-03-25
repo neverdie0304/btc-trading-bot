@@ -178,7 +178,7 @@ def generate_signals(df: pd.DataFrame) -> pd.Series:
 
     long_count = (signals == Signal.LONG).sum()
     short_count = (signals == Signal.SHORT).sum()
-    logger.info("시그널 생성 완료: LONG %d, SHORT %d, 총 %d봉",
+    logger.info("Signals generated: LONG %d, SHORT %d, total %d candles",
                 long_count, short_count, len(df))
 
     return signals

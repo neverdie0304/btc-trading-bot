@@ -107,8 +107,8 @@ def fetch_klines(
         if batch_count % 10 == 0:
             logger.info("  %d batches fetched (%d candles)", batch_count, len(all_klines))
 
-        # Rate limit 준수
-        time.sleep(0.5)
+        # Rate limit 준수 (weight 5/req, 한도 2400/min → 초당 8회 안전)
+        time.sleep(0.12)
 
     if not all_klines:
         logger.warning("수집된 데이터가 없습니다.")

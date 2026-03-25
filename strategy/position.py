@@ -117,9 +117,9 @@ def create_position(
     )
 
     logger.debug(
-        "포지션 생성: %s @ %.2f, size=%.6f, SL=%.2f, TP=%.2f, 분할TP=%s",
+        "Position created: %s @ %.2f, size=%.6f, SL=%.2f, TP=%.2f, partialTP=%s",
         direction.value, entry_price, size, sl_price, tp_price,
-        f"{len(partial_tp_config)}단계" if partial_tp_config else "없음",
+        f"{len(partial_tp_config)} levels" if partial_tp_config else "none",
     )
 
     return position
@@ -240,10 +240,10 @@ def update_trailing_stop(position: Position, close: float) -> None:
             new_sl = position.entry_price - 0.5 * position.r_unit
         position.sl_price = new_sl
         position.trailing_state = "trailing"
-        logger.debug("트레일링 스탑 업데이트: +0.5R, SL=%.2f", new_sl)
+        logger.debug("Trailing stop updated: +0.5R, SL=%.2f", new_sl)
 
     elif unrealized_r >= be_threshold and position.trailing_state == "initial":
         # 1.0R 도달: SL을 진입가로 이동 (Break-Even)
         position.sl_price = position.entry_price
         position.trailing_state = "break_even"
-        logger.debug("Break-Even 이동: SL=%.2f", position.entry_price)
+        logger.debug("Break-Even move: SL=%.2f", position.entry_price)

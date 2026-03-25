@@ -58,7 +58,7 @@ class CandleManager:
 
     async def load_initial_candles(self, count: int = 100) -> None:
         """REST API로 최근 N봉을 로드한다 (지표 warm-up 용)."""
-        logger.info("초기 캔들 %d봉 로드 중: %s %s", count, self.symbol, self.interval)
+        logger.info("Loading %d initial candles: %s %s", count, self.symbol, self.interval)
 
         klines = await self.client.futures_klines(
             symbol=self.symbol,
@@ -85,7 +85,7 @@ class CandleManager:
         self._df = df
 
         logger.info(
-            "초기 캔들 로드 완료: %d봉, %s ~ %s",
+            "Initial candles loaded: %d candles, %s ~ %s",
             len(df), df.index[0], df.index[-1],
         )
 
@@ -94,7 +94,7 @@ class CandleManager:
         self._running = True
         self._bm = BinanceSocketManager(self.client)
         self._ws_task = asyncio.create_task(self._ws_loop())
-        logger.info("WebSocket 시작: %s %s", self.symbol, self.interval)
+        logger.info("WebSocket started: %s %s", self.symbol, self.interval)
 
     async def stop(self) -> None:
         """WebSocket을 중지한다."""
@@ -105,7 +105,7 @@ class CandleManager:
                 await self._ws_task
             except asyncio.CancelledError:
                 pass
-        logger.info("WebSocket 중지")
+        logger.info("WebSocket stopped")
 
     async def _ws_loop(self) -> None:
         """WebSocket 수신 루프."""
@@ -118,24 +118,24 @@ class CandleManager:
                 )
                 async with ts as stream:
                     reconnect_delay = 1  # 연결 성공 시 리셋
-                    logger.info("WebSocket 연결 성공")
+                    logger.info("WebSocket connected")
 
                     while self._running:
                         msg = await asyncio.wait_for(stream.recv(), timeout=120)
                         self._last_msg_time = time.time()
 
                         if msg.get("e") == "error":
-                            logger.error("WebSocket 에러: %s", msg)
+                            logger.error("WebSocket error: %s", msg)
                             break
 
                         await self._process_kline_msg(msg)
 
             except asyncio.TimeoutError:
-                logger.warning("WebSocket 120초 타임아웃, 재연결...")
+                logger.warning("WebSocket 120s timeout, reconnecting...")
             except asyncio.CancelledError:
                 raise
             except Exception:
-                logger.exception("WebSocket 에러, %d초 후 재연결", reconnect_delay)
+                logger.exception("WebSocket error, reconnecting in %ds", reconnect_delay)
 
             if self._running:
                 await asyncio.sleep(reconnect_delay)
@@ -184,7 +184,7 @@ class CandleManager:
                 self._df = self._df.iloc[-MAX_CANDLES:]
 
             logger.debug(
-                "봉 확정: %s close=%.2f vol=%.2f",
+                "Candle closed: %s close=%.2f vol=%.2f",
                 open_time, candle["close"], candle["volume"],
             )
 
@@ -216,7 +216,7 @@ class CandleManager:
 
         if diff_mins > interval_mins * 2:
             count = min(int(diff_mins / interval_mins) + 5, MAX_CANDLES)
-            logger.info("누락 봉 보충: %d봉 요청", count)
+            logger.info("Filling missing candles: %d requested", count)
 
             klines = await self.client.futures_klines(
                 symbol=self.symbol,
@@ -243,4 +243,4 @@ class CandleManager:
                 self._df = pd.concat([self._df, new_df])
                 self._df = self._df[~self._df.index.duplicated(keep="last")]
                 self._df = self._df.sort_index().iloc[-MAX_CANDLES:]
-                logger.info("누락 봉 보충 완료: 현재 %d봉", len(self._df))
+                logger.info("Missing candles filled: now %d candles", len(self._df))

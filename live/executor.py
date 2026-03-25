@@ -35,12 +35,18 @@ def _round_price(price: float, tick_size: float = 0.10) -> float:
 
 def _round_qty(qty: float, step_size: float = 0.001) -> float:
     """수량을 스텝 사이즈에 맞춰 내림한다."""
-    return int(qty / step_size) * step_size
+    decimals = max(0, -int(math.log10(step_size)))
+    return round(int(qty / step_size) * step_size, decimals)
 
 
 def _close_side(direction: Signal) -> str:
     """포지션 청산 방향을 반환한다."""
     return SIDE_SELL if direction == Signal.LONG else SIDE_BUY
+
+
+def _get_order_id(order: dict) -> str:
+    """주문 응답에서 ID를 추출한다 (orderId 또는 algoId)."""
+    return str(order.get("orderId") or order.get("algoId") or "unknown")
 
 
 class BaseExecutor(ABC):
@@ -139,7 +145,7 @@ class BaseExecutor(ABC):
             )
 
         logger.info(
-            "포지션 종료: %s @ %.2f → %.2f, PnL=%.2f, R=%.2fR, reason=%s",
+            "Position closed: %s @ %g → %g, PnL=%.2f, R=%.2fR, reason=%s",
             pos.direction.value, pos.entry_price, exit_price,
             net_pnl, r_multiple, reason,
         )
@@ -221,7 +227,7 @@ class PaperExecutor(BaseExecutor):
         ))
 
         logger.info(
-            "[PAPER] 포지션 오픈: %s @ %.2f, size=%.6f, SL=%.2f, TP=%.2f",
+            "[PAPER] Position opened: %s @ %g, size=%.6f, SL=%g, TP=%g",
             position.direction.value, position.entry_price, position.size,
             position.sl_price, position.tp_price,
         )
@@ -291,7 +297,7 @@ class PaperExecutor(BaseExecutor):
         self.state.tp_order_id = self._gen_order_id()
 
         logger.info(
-            "[PAPER] 분할 TP 히트: %.2f, PnL=%.2f, 잔여=%.6f, SL→%.2f, 최종TP=%.2f",
+            "[PAPER] Partial TP hit: %.2f, PnL=%.2f, remaining=%.6f, SL→%.2f, finalTP=%.2f",
             partial_tp_price, net_pnl, remaining_qty, pos.sl_price, pos.tp_price,
         )
         return True
@@ -313,21 +319,21 @@ class PaperExecutor(BaseExecutor):
             old_sl = self.state.position.sl_price
             self.state.position.sl_price = new_sl
             self.state.sl_order_id = self._gen_order_id()
-            logger.debug("[PAPER] SL 업데이트: %.2f → %.2f", old_sl, new_sl)
+            logger.debug("[PAPER] SL update: %.2f → %.2f", old_sl, new_sl)
             return True
         return False
 
     async def cancel_entry_limit(self) -> None:
         """페이퍼 진입 주문 취소 (상태 초기화)."""
         self._clear_position_state()
-        logger.info("[PAPER] 진입 주문 취소")
+        logger.info("[PAPER] Entry order cancelled")
 
     async def cancel_all_orders(self) -> None:
         """페이퍼 주문 취소 (상태만 정리)."""
         self.state.sl_order_id = None
         self.state.tp_order_id = None
         self.state.partial_tp_order_id = None
-        logger.info("[PAPER] 주문 취소")
+        logger.info("[PAPER] Orders cancelled")
 
     async def emergency_close(self) -> None:
         """비상 청산."""
@@ -335,7 +341,7 @@ class PaperExecutor(BaseExecutor):
             await self.close_position("KILL_SWITCH", self.state.position.sl_price)
         await self.cancel_all_orders()
         self.state.is_active = False
-        logger.critical("[PAPER] 비상 청산 완료")
+        logger.critical("[PAPER] Emergency close complete")
 
 
 class LiveExecutor(BaseExecutor):
@@ -369,13 +375,13 @@ class LiveExecutor(BaseExecutor):
                         elif f["filterType"] == "LOT_SIZE":
                             self.step_size = float(f["stepSize"])
                     logger.info(
-                        "%s 거래 규칙: tick=%.8f, step=%.8f",
+                        "%s trading rules: tick=%.8f, step=%.8f",
                         self.symbol, self.tick_size, self.step_size,
                     )
                     return
-            logger.warning("%s 심볼 정보를 찾을 수 없습니다", self.symbol)
+            logger.warning("%s symbol info not found", self.symbol)
         except Exception:
-            logger.exception("심볼 정보 조회 실패, 기본값 사용")
+            logger.exception("Symbol info fetch failed, using defaults")
 
     async def setup_leverage(self) -> None:
         """레버리지 설정."""
@@ -384,9 +390,9 @@ class LiveExecutor(BaseExecutor):
             await self.client.futures_change_leverage(
                 symbol=self.symbol, leverage=leverage
             )
-            logger.info("레버리지 설정: %dx", leverage)
+            logger.info("Leverage set: %dx", leverage)
         except Exception:
-            logger.exception("레버리지 설정 실패")
+            logger.exception("Leverage setup failed")
 
     async def sync_exchange_state(self) -> None:
         """거래소 상태를 동기화한다 (잔고, 고아 포지션 처리)."""
@@ -408,7 +414,7 @@ class LiveExecutor(BaseExecutor):
                 if amt != 0 and self.state.position is None:
                     direction = Signal.LONG if amt > 0 else Signal.SHORT
                     logger.warning(
-                        "봇이 모르는 고아 포지션 발견! 시장가 청산: %s %s %.6f",
+                        "Orphan position found! Market closing: %s %s %.6f",
                         self.symbol, direction.value, abs(amt),
                     )
                     try:
@@ -420,17 +426,17 @@ class LiveExecutor(BaseExecutor):
                             quantity=abs(amt),
                             reduceOnly=True,
                         )
-                        logger.info("고아 포지션 청산 완료")
+                        logger.info("Orphan position closed")
                     except Exception:
-                        logger.exception("고아 포지션 자동 청산 실패! 수동 확인 필요")
+                        logger.exception("Orphan position auto-close failed! Manual check required")
 
             if self.state.position is not None and not self.state.entry_filled:
-                logger.info("재시작 후 pending LIMIT 상태 감지 → REST로 체결 확인")
+                logger.info("Pending LIMIT detected after restart → checking via REST")
                 await self.check_pending_entry()
 
-            logger.info("거래소 동기화 완료: balance=%.2f", self.state.balance)
+            logger.info("Exchange sync complete: balance=%.2f", self.state.balance)
         except Exception:
-            logger.exception("거래소 동기화 실패")
+            logger.exception("Exchange sync failed")
 
     # ── 주문 발행 헬퍼 ───────────────────────────────────────────
 
@@ -449,10 +455,10 @@ class LiveExecutor(BaseExecutor):
                 quantity=qty,
                 reduceOnly=True,
             )
-            logger.info("TP 주문 설정 (LIMIT): %.2f (orderId=%s)", tp_price, order["orderId"])
+            logger.info("TP order set (LIMIT): %.2f (orderId=%s)", tp_price, _get_order_id(order))
             return order
         except Exception:
-            logger.exception("TP 주문 실패")
+            logger.exception("TP order failed")
             return None
 
     async def _place_sl_order(self, position: Position) -> dict | None:
@@ -468,10 +474,10 @@ class LiveExecutor(BaseExecutor):
                 quantity=qty,
                 reduceOnly=True,
             )
-            logger.info("SL 주문 설정 (STOP_MARKET): trigger=%.2f (orderId=%s)", stop_price, order["orderId"])
+            logger.info("SL order set (STOP_MARKET): trigger=%.2f (orderId=%s)", stop_price, _get_order_id(order))
             return order
         except Exception:
-            logger.exception("SL 주문 실패")
+            logger.exception("SL order failed")
             return None
 
     async def _place_partial_tp_order(
@@ -481,7 +487,7 @@ class LiveExecutor(BaseExecutor):
         tp_price_rounded = _round_price(tp_price, self.tick_size)
         qty_rounded = _round_qty(qty, self.step_size)
         if qty_rounded <= 0:
-            logger.warning("분할 TP 수량 0, 주문 취소")
+            logger.warning("Partial TP qty 0, order cancelled")
             return None
         try:
             order = await self.client.futures_create_order(
@@ -494,10 +500,10 @@ class LiveExecutor(BaseExecutor):
                 quantity=qty_rounded,
                 reduceOnly=True,
             )
-            logger.info("분할 TP 주문 설정 (LIMIT): %.2f qty=%.6f (orderId=%s)", tp_price_rounded, qty_rounded, order["orderId"])
+            logger.info("Partial TP order set (LIMIT): %.2f qty=%.6f (orderId=%s)", tp_price_rounded, qty_rounded, _get_order_id(order))
             return order
         except Exception:
-            logger.exception("분할 TP 주문 실패")
+            logger.exception("Partial TP order failed")
             return None
 
     async def _place_trailing_sl_order(self, position: Position) -> dict | None:
@@ -519,10 +525,10 @@ class LiveExecutor(BaseExecutor):
                 quantity=qty,
                 reduceOnly=True,
             )
-            logger.info("트레일링 SL 주문 (STOP_LIMIT): trigger=%.2f, limit=%.2f (orderId=%s)", stop_price, limit_price, order["orderId"])
+            logger.info("Trailing SL order (STOP_LIMIT): trigger=%.2f, limit=%.2f (orderId=%s)", stop_price, limit_price, _get_order_id(order))
             return order
         except Exception:
-            logger.exception("트레일링 SL 주문 실패")
+            logger.exception("Trailing SL order failed")
             return None
 
     # ── 체결 후 SL/TP 설정 (중복 제거) ────────────────────────────
@@ -566,17 +572,17 @@ class LiveExecutor(BaseExecutor):
         # SL 주문 (전체 수량)
         sl_order = await self._place_sl_order(pos)
         if sl_order:
-            self.state.sl_order_id = str(sl_order["orderId"])
+            self.state.sl_order_id = str(_get_order_id(sl_order))
 
         if is_partial_tp:
             partial_qty = _round_qty(filled_qty * partial_fraction, self.step_size)
             partial_order = await self._place_partial_tp_order(pos, partial_qty, partial_tp_price)
             if partial_order:
-                self.state.partial_tp_order_id = str(partial_order["orderId"])
+                self.state.partial_tp_order_id = str(_get_order_id(partial_order))
         else:
             tp_order = await self._place_tp_order(pos)
             if tp_order:
-                self.state.tp_order_id = str(tp_order["orderId"])
+                self.state.tp_order_id = str(_get_order_id(tp_order))
 
         # DB 업데이트
         if self.state.trades_today:
@@ -595,7 +601,7 @@ class LiveExecutor(BaseExecutor):
         side = SIDE_BUY if position.direction == Signal.LONG else SIDE_SELL
         qty = _round_qty(position.size, self.step_size)
         if qty <= 0:
-            logger.warning("주문 수량 0, 진입 취소")
+            logger.warning("Order qty 0, entry cancelled")
             return False
 
         limit_price = _round_price(position.entry_price, self.tick_size)
@@ -610,9 +616,9 @@ class LiveExecutor(BaseExecutor):
                 await self.client.futures_change_leverage(
                     symbol=self.symbol, leverage=trade_leverage,
                 )
-                logger.info("레버리지 동적 설정: %dx (notional=%.2f, balance=%.2f)", trade_leverage, notional, self.state.balance)
+                logger.info("Dynamic leverage set: %dx (notional=%.2f, balance=%.2f)", trade_leverage, notional, self.state.balance)
             except Exception:
-                logger.warning("레버리지 설정 실패 — 현재 거래소 설정값으로 진행")
+                logger.warning("Leverage setup failed — using current exchange setting")
 
         try:
             order = await self.client.futures_create_order(
@@ -623,7 +629,7 @@ class LiveExecutor(BaseExecutor):
                 quantity=qty,
                 price=limit_price,
             )
-            order_id = str(order["orderId"])
+            order_id = str(_get_order_id(order))
             logger.info("LIMIT 진입 주문: %s %s qty=%.6f @ %.2f → orderId=%s", side, self.symbol, qty, limit_price, order_id)
 
             self.state.position = position
@@ -656,7 +662,7 @@ class LiveExecutor(BaseExecutor):
 
             return True
         except Exception:
-            logger.exception("LIMIT 진입 주문 실패")
+            logger.exception("LIMIT entry order failed")
             return False
 
     async def close_position(self, reason: str, price: float | None = None) -> bool:
@@ -680,10 +686,10 @@ class LiveExecutor(BaseExecutor):
                 reduceOnly=True,
             )
             exit_price = float(order.get("avgPrice", price or 0))
-            self._record_exit(pos, exit_price, reason, str(order["orderId"]))
+            self._record_exit(pos, exit_price, reason, str(_get_order_id(order)))
             return True
         except Exception:
-            logger.exception("청산 실패!")
+            logger.exception("Close position failed!")
             return False
 
     async def update_sl_order(self, new_sl: float) -> bool:
@@ -696,9 +702,9 @@ class LiveExecutor(BaseExecutor):
                 await self.client.futures_cancel_order(
                     symbol=self.symbol, orderId=self.state.sl_order_id,
                 )
-                logger.debug("기존 SL 주문 취소: %s", self.state.sl_order_id)
+                logger.debug("Existing SL order cancelled: %s", self.state.sl_order_id)
             except Exception:
-                logger.warning("기존 SL 취소 실패, 새 주문 진행")
+                logger.warning("Existing SL cancel failed, placing new order")
 
         self.state.position.sl_price = new_sl
 
@@ -708,7 +714,7 @@ class LiveExecutor(BaseExecutor):
             sl_order = await self._place_sl_order(self.state.position)
 
         if sl_order:
-            self.state.sl_order_id = str(sl_order["orderId"])
+            self.state.sl_order_id = str(_get_order_id(sl_order))
             return True
         return False
 
@@ -725,7 +731,7 @@ class LiveExecutor(BaseExecutor):
                 orderId=self.state.entry_order_id,
             )
         except Exception:
-            logger.exception("진입 주문 상태 조회 실패 (REST)")
+            logger.exception("Entry order status check failed (REST)")
             return False
 
         status = order.get("status", "")
@@ -735,14 +741,14 @@ class LiveExecutor(BaseExecutor):
             filled_qty = float(order.get("executedQty", 0)) or self.state.position.size
             await self._setup_sl_tp_after_fill(self.state.position, avg_price, filled_qty)
             logger.warning(
-                "[REST 복구] 진입 체결 이벤트 누락 복구: %s @ %.4f, SL=%.4f, TP=%.4f",
+                "[REST recovery] Missed entry fill event recovered: %s @ %.4f, SL=%.4f, TP=%.4f",
                 self.state.position.direction.value, avg_price,
                 self.state.position.sl_price, self.state.position.tp_price,
             )
             return True
 
         if status in ("CANCELED", "EXPIRED"):
-            logger.info("진입 LIMIT 주문이 이미 취소됨 (REST 확인): %s", status)
+            logger.info("Entry LIMIT order already cancelled (REST check): %s", status)
             self._cancel_pending_trade_db()
             self._clear_position_state()
 
@@ -755,46 +761,70 @@ class LiveExecutor(BaseExecutor):
                 await self.client.futures_cancel_order(
                     symbol=self.symbol, orderId=self.state.entry_order_id,
                 )
-                logger.info("진입 LIMIT 주문 취소: %s", self.state.entry_order_id)
+                logger.info("Entry LIMIT order cancelled: %s", self.state.entry_order_id)
             except Exception:
-                logger.warning("진입 LIMIT 취소 실패 — 주문 상태 확인")
+                logger.warning("Entry LIMIT cancel failed — checking order status")
                 try:
                     order = await self.client.futures_get_order(
                         symbol=self.symbol, orderId=self.state.entry_order_id,
                     )
                     if order.get("status") == "FILLED":
-                        logger.warning("[cancel_entry_limit] 취소 시도 중 체결 확인 → SL/TP 설정")
+                        logger.warning("[cancel_entry_limit] Fill detected during cancel → setting SL/TP")
                         pos = self.state.position
                         avg_price = float(order.get("avgPrice", pos.entry_price))
                         filled_qty = float(order.get("executedQty", 0)) or pos.size
                         await self._setup_sl_tp_after_fill(pos, avg_price, filled_qty)
                         return
                 except Exception:
-                    logger.exception("주문 상태 확인 실패, 상태 초기화 진행")
+                    logger.exception("Order status check failed, clearing state")
 
         self._cancel_pending_trade_db()
         self._clear_position_state()
 
     async def cancel_all_orders(self) -> None:
-        """모든 미체결 주문을 취소한다."""
+        """모든 미체결 주문을 취소한다 (일반 + algo 주문)."""
+        # 일반 주문 취소
         try:
             await self.client.futures_cancel_all_open_orders(symbol=self.symbol)
-            logger.info("모든 미체결 주문 취소 완료")
+            logger.info("Open orders cancelled")
         except Exception:
-            logger.exception("주문 취소 실패")
+            logger.exception("Order cancel failed")
+
+        # Algo(조건부) 주문 전체 조회 후 취소
+        try:
+            algo_orders = await self.client._request_futures_api(
+                "get", "openAlgoOrders", signed=True,
+                data={"symbol": self.symbol},
+            )
+            for ao in algo_orders:
+                aid = ao.get("algoId")
+                if aid:
+                    try:
+                        await self.client._request_futures_api(
+                            "delete", "algoOrder", signed=True,
+                            data={"algoId": aid},
+                        )
+                        logger.info("Algo order cancelled: %s (%s)", aid, ao.get("orderType"))
+                    except Exception:
+                        logger.debug("Algo order cancel failed: %s", aid)
+            if algo_orders:
+                logger.info("Algo orders cancelled: %d", len(algo_orders))
+        except Exception:
+            logger.exception("Algo order query/cancel failed")
+
         self.state.sl_order_id = None
         self.state.tp_order_id = None
         self.state.partial_tp_order_id = None
 
     async def emergency_close(self) -> None:
         """비상 청산: 모든 주문 취소 + 포지션 시장가 청산."""
-        logger.critical("비상 청산 시작!")
+        logger.critical("Emergency close initiated!")
         if self.state.position:
             await self.close_position("KILL_SWITCH")
         else:
             await self.cancel_all_orders()
         self.state.is_active = False
-        logger.critical("비상 청산 완료, 봇 비활성화")
+        logger.critical("Emergency close complete, bot deactivated")
 
     # ── WebSocket 이벤트 처리 ────────────────────────────────────
 
@@ -816,7 +846,7 @@ class LiveExecutor(BaseExecutor):
         symbol = order.get("s", "")
 
         logger.info(
-            "주문 이벤트: id=%s type=%s status=%s symbol=%s (entry=%s filled=%s SL=%s TP=%s PTP=%s)",
+            "Order event: id=%s type=%s status=%s symbol=%s (entry=%s filled=%s SL=%s TP=%s PTP=%s)",
             order_id, order_type, status, symbol,
             self.state.entry_order_id, self.state.entry_filled,
             self.state.sl_order_id, self.state.tp_order_id,
@@ -845,13 +875,13 @@ class LiveExecutor(BaseExecutor):
                     else:
                         ptp = avg_price - _std_tp_r * pos.r_unit
                     logger.info(
-                        ">>> 진입 LIMIT 체결 (분할TP): %s @ %.4f, qty=%.6f, SL=%.4f, 분할TP=%.4f, 최종TP=%.4f",
+                        ">>> Entry LIMIT filled (partialTP): %s @ %.4f, qty=%.6f, SL=%.4f, partialTP=%.4f, finalTP=%.4f",
                         pos.direction.value, avg_price, filled_qty,
                         pos.sl_price, ptp, pos.tp_price,
                     )
                 else:
                     logger.info(
-                        ">>> 진입 LIMIT 체결: %s @ %.4f, qty=%.6f, SL=%.4f, TP=%.4f",
+                        ">>> Entry LIMIT filled: %s @ %.4f, qty=%.6f, SL=%.4f, TP=%.4f",
                         pos.direction.value, avg_price, filled_qty,
                         pos.sl_price, pos.tp_price,
                     )
@@ -885,7 +915,7 @@ class LiveExecutor(BaseExecutor):
                 self.state.partial_tp_order_id = None
 
                 logger.info(
-                    ">>> 분할 TP 체결: %.4f, qty=%.6f (%.0f%%), PnL=%.2f — SL→%.4f, 잔여 %.6f→최종TP=%.4f",
+                    ">>> Partial TP filled: %.4f, qty=%.6f (%.0f%%), PnL=%.2f — SL→%.4f, remaining %.6f→finalTP=%.4f",
                     avg_price, partial_qty, partial_fraction * 100, net_pnl,
                     avg_price, remaining_qty, pos.tp_price,
                 )
@@ -897,7 +927,7 @@ class LiveExecutor(BaseExecutor):
                             symbol=self.symbol, orderId=self.state.sl_order_id,
                         )
                     except Exception:
-                        logger.warning("분할익절 후 기존 SL 취소 실패 — 계속 진행")
+                        logger.warning("Existing SL cancel failed after partial TP — continuing")
                     self.state.sl_order_id = None
 
                 pos.size = remaining_qty
@@ -906,11 +936,11 @@ class LiveExecutor(BaseExecutor):
 
                 sl_order = await self._place_sl_order(pos)
                 if sl_order:
-                    self.state.sl_order_id = str(sl_order["orderId"])
+                    self.state.sl_order_id = str(_get_order_id(sl_order))
 
                 tp_order = await self._place_tp_order(pos)
                 if tp_order:
-                    self.state.tp_order_id = str(tp_order["orderId"])
+                    self.state.tp_order_id = str(_get_order_id(tp_order))
 
                 if self.state.trades_today:
                     self.db.update_trade_entry(
@@ -957,12 +987,12 @@ class LiveExecutor(BaseExecutor):
         elif (status == "CANCELED"
               and order_id == self.state.entry_order_id
               and not self.state.entry_filled):
-            logger.info("진입 LIMIT 외부 취소: %s", order_id)
+            logger.info("Entry LIMIT externally cancelled: %s", order_id)
             self._cancel_pending_trade_db()
             self._clear_position_state()
 
         # ── 5. STOP_LIMIT 만료 (갭 통과 폴백)
         elif status == "EXPIRED" and order_id == self.state.sl_order_id:
-            logger.warning("SL STOP_LIMIT 만료 (갭 통과), 시장가 청산 실행!")
+            logger.warning("SL STOP_LIMIT expired (gap through), executing market close!")
             if self.state.position and self.state.entry_filled:
                 await self.close_position("SL_FALLBACK")

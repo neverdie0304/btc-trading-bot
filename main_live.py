@@ -112,32 +112,16 @@ class LiveBot:
                 BINANCE_API_KEY, BINANCE_API_SECRET
             )
 
-        # 3.5. 실제 Binance Futures 잔고 조회 (USDT-M + USDC-M)
+        # 3.5. 실제 Binance Futures 잔고 조회
         try:
             real_balance = 0.0
-            # USDT-M 잔고
-            try:
-                usdt_account = await self.client.futures_account()
-                usdt_bal = float(usdt_account.get("availableBalance", 0))
-                if usdt_bal > 0:
-                    real_balance += usdt_bal
-                    logger.info("USDT-M 잔고: $%.2f", usdt_bal)
-            except Exception:
-                pass
-            # USDC-M (Portfolio Margin / CM Futures) 잔고
-            try:
-                balances = await self.client._request_api(
-                    "get", "papi/v1/balance", signed=True
-                )
-                for asset in balances:
-                    if asset.get("asset") in ("USDC", "USDT"):
-                        ab = float(asset.get("availableBalance", 0))
-                        if ab > 0:
-                            real_balance += ab
-                            logger.info("%s (Portfolio) 잔고: $%.2f",
-                                        asset["asset"], ab)
-            except Exception:
-                pass
+            account = await self.client.futures_account()
+            for asset in account.get("assets", []):
+                if asset["asset"] in ("USDT", "USDC"):
+                    bal = float(asset.get("walletBalance", 0))
+                    if bal > 0:
+                        real_balance += bal
+                        logger.info("%s 잔고: $%.2f", asset["asset"], bal)
 
             logger.info("Binance 총 잔고: $%.2f", real_balance)
             if real_balance > 0:
