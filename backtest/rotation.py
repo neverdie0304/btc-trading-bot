@@ -14,7 +14,7 @@ from tqdm import tqdm
 from config.settings import SETTINGS
 from strategy.signals import compute_indicators, generate_signals, Signal
 from strategy.filters import should_filter
-from strategy.position import create_position, check_sl_tp_hit, update_trailing_stop
+from strategy.position import create_position, check_sl_tp_hit
 from backtest.portfolio import Portfolio
 
 logger = logging.getLogger(__name__)
@@ -208,8 +208,6 @@ def run_rotation_backtest(
                         exit_index=idx,
                         exit_reason=reason,
                     )
-                else:
-                    update_trailing_stop(portfolio.position, close)
 
             # 필터 체크
             candles_since_loss = idx - portfolio.last_loss_index

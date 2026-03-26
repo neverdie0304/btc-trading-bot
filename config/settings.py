@@ -34,21 +34,14 @@ SETTINGS: dict = {
     "deadzone_atr_ratio": 0.5,
     "atr_signal_multiplier": 1.5,
 
-    # 리스크 관리 (SL=1.2 TP=3.6 → 1:3R / 트레일링 OFF / risk=5% lev=20x)
+    # 리스크 관리 (SL=1.2 TP=5.0 → 공격적 / 트레일링 OFF / risk=5% lev=20x)
     "leverage": 20,
     "risk_per_trade": 0.05,
     "sl_atr_multiplier": 1.2,
-    "tp_atr_multiplier": 3.6,
-    "trailing_be_threshold": 9999,
-    "trailing_step_threshold": 9999,
+    "tp_atr_multiplier": 5.0,
     "max_concurrent_positions": 1,
     "reverse_on_opposite_signal": False,
-
-    # 분할 익절 (3/4@2.5R → 나머지 1/4는 4R, SL→2.5R)
-    # partial_tp_r = tp_atr_multiplier / sl_atr_multiplier = 2.5R (자동 계산)
-    "partial_tp_enabled": True,      # 분할 익절 활성화 여부
-    "partial_tp_fraction": 0.75,     # 첫 TP에서 익절할 비율 (75%)
-    "final_tp_r": 4.0,               # 잔여 물량 최종 TP (R 단위)
+    "short_enabled": False,         # 숏 매매 비활성화 (최적화 결과: OFF가 우수)
 
     # 비용 (USDT-M: maker 0.02%, taker 0.05%)
     "maker_fee": 0.0002,           # limit order (진입, TP 청산) 0.02%

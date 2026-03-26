@@ -6,7 +6,7 @@
 
 SCANNER_SETTINGS: dict = {
     # ── 심볼 선정 ──
-    "min_24h_quote_volume": 100_000_000,  # $100M 이상
+    "min_24h_quote_volume": 50_000_000,  # $50M 이상
     "max_24h_quote_volume": None,         # 상한 없음 (None=무제한)
     "quote_asset": "USDT",
     "symbol_refresh_interval_hours": 1,

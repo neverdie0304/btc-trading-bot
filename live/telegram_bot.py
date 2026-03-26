@@ -229,7 +229,7 @@ class TelegramNotifier:
                 f"*{sym}* {pos.direction.value}\n"
                 f"  Entry: ${_fmt_price(pos.entry_price)}\n"
                 f"  SL: ${_fmt_price(pos.sl_price)} | TP: ${_fmt_price(pos.tp_price)}\n"
-                f"  Size: {pos.size:.4f} | Trail: {pos.trailing_state}"
+                f"  Size: {pos.size:.4f}"
             )
 
         await update.message.reply_text("\n".join(lines), parse_mode="Markdown")

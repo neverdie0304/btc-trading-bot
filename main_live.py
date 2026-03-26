@@ -26,7 +26,7 @@ from strategy.signals import (
     Signal, compute_indicators, check_long_conditions, check_short_conditions,
 )
 from strategy.filters import should_filter
-from strategy.position import create_position, update_trailing_stop
+from strategy.position import create_position
 from live.candle_manager import CandleManager
 from live.state import LiveState
 from live.logger_db import TradeLogger
@@ -217,46 +217,8 @@ class LiveBot:
         """실시간 가격 업데이트 → 트레일링 스탑 즉시 반영."""
         if self._shutdown or self.state.position is None:
             return
-        # 진입 LIMIT 미체결 상태에서는 트레일링 금지
-        if not self.state.entry_filled:
-            return
-
-        pos = self.state.position
-
-        # ── 트레일링 SL 갭 통과 방어 (live 전용) ──────────────────────────
-        # Binance GTC STOP_LIMIT은 급등/급락 갭 발생 시 EXPIRED가 오지 않고
-        # NEW 상태 LIMIT 주문으로 대기만 한다 → 포지션이 SL 없이 방치됨.
-        # 현재 가격이 trailing SL을 r_unit의 10% 이상 이탈했으면 즉시 시장가 청산.
-        if self.mode == "live" and pos.trailing_state != "initial" and pos.r_unit > 0:
-            gap_threshold = pos.r_unit * 0.1  # 약 0.12 * ATR 수준
-            if pos.direction.value == "LONG" and price < pos.sl_price - gap_threshold:
-                logger.warning(
-                    "LONG 트레일링 SL 갭 통과: price=%.4f < SL=%.4f - %.4f → 시장가 청산",
-                    price, pos.sl_price, gap_threshold,
-                )
-                await self.executor.close_position("TRAILING_SL_GAP", price)
-                self.state.save_to_db(self.db)
-                return
-            elif pos.direction.value == "SHORT" and price > pos.sl_price + gap_threshold:
-                logger.warning(
-                    "SHORT 트레일링 SL 갭 통과: price=%.4f > SL=%.4f + %.4f → 시장가 청산",
-                    price, pos.sl_price, gap_threshold,
-                )
-                await self.executor.close_position("TRAILING_SL_GAP", price)
-                self.state.save_to_db(self.db)
-                return
-
-        old_sl = pos.sl_price
-        update_trailing_stop(pos, price)
-
-        if pos.sl_price != old_sl:
-            await self.executor.update_sl_order(pos.sl_price)
-            logger.info(
-                "실시간 트레일링 SL: %.4f → %.4f (price=%.4f, state=%s)",
-                old_sl, pos.sl_price,
-                price, pos.trailing_state,
-            )
-            self.state.save_to_db(self.db)
+        # 단일 SL/TP 전략 — 실시간 가격 업데이트에서 별도 처리 불필요
+        return
 
     async def _on_candle_closed(self, df: pd.DataFrame) -> None:
         """봉 확정 이벤트 핸들러. 핵심 트레이딩 로직."""
@@ -330,12 +292,6 @@ class LiveBot:
                     self.state.save_to_db(self.db)
                     self._log_status()
                     return
-                # Paper: 트레일링 스탑도 봉 단위로 체크
-                old_sl = self.state.position.sl_price
-                update_trailing_stop(self.state.position, close)
-                if self.state.position.sl_price != old_sl:
-                    await self.executor.update_sl_order(self.state.position.sl_price)
-            # Live: 트레일링은 _on_price_update에서 실시간 처리
 
         # 2. 필터 체크
         atr_val = latest.get("atr", 0)
@@ -361,7 +317,7 @@ class LiveBot:
         if not (pd.isna(latest.get("atr")) or pd.isna(latest.get("rsi")) or pd.isna(latest.get("volume_ratio"))):
             if check_long_conditions(latest, prev):
                 signal = Signal.LONG
-            elif check_short_conditions(latest, prev):
+            elif SETTINGS.get("short_enabled", True) and check_short_conditions(latest, prev):
                 signal = Signal.SHORT
 
         if signal == Signal.NO_SIGNAL:
@@ -508,7 +464,6 @@ class LiveBot:
                 "size": p.size,
                 "sl_price": p.sl_price,
                 "tp_price": p.tp_price,
-                "trailing_state": p.trailing_state,
             }
 
         return {
@@ -534,8 +489,7 @@ class LiveBot:
             pos_str = (
                 f"{self.state.position.direction.value} @ "
                 f"{self.state.position.entry_price:.2f} "
-                f"SL={self.state.position.sl_price:.2f} "
-                f"({self.state.position.trailing_state})"
+                f"SL={self.state.position.sl_price:.2f}"
             )
 
         logger.info(

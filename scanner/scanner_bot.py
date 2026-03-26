@@ -12,7 +12,7 @@ import pandas as pd
 from binance import AsyncClient
 
 from config.settings import BINANCE_API_KEY, BINANCE_API_SECRET, SETTINGS
-from strategy.position import create_position, update_trailing_stop, Position
+from strategy.position import create_position, Position
 from strategy.signals import Signal
 from live.state import LiveState
 from live.logger_db import TradeLogger
@@ -243,33 +243,12 @@ class ScannerBot:
                 self._batch_task = asyncio.create_task(self._process_signal_batch())
 
     async def _on_price_update(self, symbol: str, kline: dict) -> None:
-        """실시간 가격 업데이트 → 트레일링 스탑."""
+        """실시간 가격 업데이트 → SL 히트 체크."""
         if self._shutdown or symbol not in self.state.positions:
             return
 
         price = float(kline["c"])
         pos = self.state.positions[symbol]
-
-        # 트레일링 SL 업데이트
-        old_sl = pos.sl_price
-        update_trailing_stop(pos, price)
-
-        if pos.sl_price != old_sl:
-            executor = self._executors.get(symbol)
-            if executor:
-                await executor.update_sl_order(pos.sl_price)
-            logger.info(
-                "[TRAIL] %s SL: %s → %s (price=%s, state=%s)",
-                symbol, _fmt_price(old_sl), _fmt_price(pos.sl_price),
-                _fmt_price(price), pos.trailing_state,
-            )
-            self.state.save_to_db("data/scanner_trades.db")
-            await self.telegram.notify_trailing(
-                symbol=symbol,
-                old_sl=old_sl,
-                new_sl=pos.sl_price,
-                state=pos.trailing_state,
-            )
 
         # Paper 모드: SL 히트 체크
         if self.mode == "paper":
@@ -291,7 +270,7 @@ class ScannerBot:
                     self.risk_manager.update_daily_pnl(pnl)
                     self.state.save_to_db("data/scanner_trades.db")
                     logger.info("[EXIT] %s SL hit PnL=$%.2f | Balance=$%.2f", symbol, pnl, self.state.balance)
-                    risk_amount = pos.r_unit * pos.original_size
+                    risk_amount = pos.r_unit * pos.size
                     r_mult = pnl / risk_amount if risk_amount else 0
                     await self.telegram.notify_exit(
                         symbol=symbol, direction=pos.direction.value,
@@ -387,18 +366,6 @@ class ScannerBot:
 
         live_state = self._live_states.get(symbol)
 
-        # 분할 TP 체크
-        if hasattr(executor, 'check_partial_tp'):
-            bal_before = live_state.balance if live_state else 0
-            partial_hit = await executor.check_partial_tp(high, low)
-            if partial_hit and live_state:
-                pnl = live_state.balance - bal_before
-                self.state.balance += pnl
-                self.state.daily_pnl += pnl
-                self.risk_manager.update_daily_pnl(pnl)
-                self.state.save_to_db("data/scanner_trades.db")
-                logger.info("[PARTIAL_TP] %s PnL=$%.2f | Balance=$%.2f", symbol, pnl, self.state.balance)
-
         # SL/TP 체크
         bal_before = live_state.balance if live_state else 0
         hit = await executor.check_sl_tp(high, low)
@@ -409,7 +376,7 @@ class ScannerBot:
             self.risk_manager.update_daily_pnl(pnl)
             self.state.save_to_db("data/scanner_trades.db")
             logger.info("[EXIT] %s PnL=$%.2f | Balance=$%.2f", symbol, pnl, self.state.balance)
-            risk_amount = pos.r_unit * pos.original_size
+            risk_amount = pos.r_unit * pos.size
             r_mult = pnl / risk_amount if risk_amount else 0
             await self.telegram.notify_exit(
                 symbol=symbol, direction=pos.direction.value,
@@ -596,7 +563,7 @@ class ScannerBot:
         for sym, pos in self.state.positions.items():
             pos_strs.append(
                 f"{sym} {pos.direction.value}@{_fmt_price(pos.entry_price)} "
-                f"SL={_fmt_price(pos.sl_price)}({pos.trailing_state})"
+                f"SL={_fmt_price(pos.sl_price)}"
             )
         pos_display = " | ".join(pos_strs) if pos_strs else "None"
 

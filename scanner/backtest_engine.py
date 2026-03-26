@@ -13,9 +13,7 @@ from tqdm import tqdm
 from config.settings import SETTINGS
 from strategy.signals import Signal, compute_indicators, check_long_conditions, check_short_conditions
 from strategy.filters import should_filter
-from strategy.position import (
-    Position, create_position, check_sl_tp_hit, check_partial_tp_hit, update_trailing_stop,
-)
+from strategy.position import Position, create_position, check_sl_tp_hit
 from scanner.config import SCANNER_SETTINGS
 from scanner.prioritizer import compute_score
 from scanner.signal_engine import SignalEvent
@@ -83,7 +81,6 @@ class MultiPortfolio:
         if pos.direction == Signal.LONG:
             raw_pnl = (exit_price - pos.entry_price) * pos.size
         else:
-            raw_pnl = (pos.entry_price - pos.entry_price) * pos.size
             raw_pnl = (pos.entry_price - exit_price) * pos.size
 
         # 수수료
@@ -92,7 +89,7 @@ class MultiPortfolio:
         notional_entry = pos.entry_price * pos.size
         notional_exit = exit_price * pos.size
         entry_fee = notional_entry * maker_fee
-        is_limit_exit = exit_reason in ("TP", "PARTIAL_TP")
+        is_limit_exit = exit_reason == "TP"
         exit_fee = notional_exit * (maker_fee if is_limit_exit else taker_fee)
         commission = entry_fee + exit_fee
         slippage = notional_exit * SETTINGS.get("slippage_rate", 0) if not is_limit_exit else 0.0
@@ -156,8 +153,6 @@ def run_multi_backtest(
     daily_active: dict[str, list[str]],
     capital: float | None = None,
     max_positions: int | None = None,
-    partial_tp_config: list | None = None,
-    final_tp_r: float | None = None,
 ) -> MultiPortfolio:
     """멀티심볼 백테스트를 실행한다.
 
@@ -234,54 +229,6 @@ def run_multi_backtest(
             hit, exit_price, reason = check_sl_tp_hit(pos, row["high"], row["low"])
             if hit:
                 portfolio.close_position(sym, exit_price, str(timestamp), reason, ti)
-                continue
-
-            # 분할 익절
-            if pos.tp_levels:
-                hit_partials = check_partial_tp_hit(pos, row["high"], row["low"])
-                for pt_price, pt_fraction, pt_new_sl_r in hit_partials:
-                    if sym in portfolio.positions:
-                        # 간소화: 분할익절 PnL 반영
-                        close_size = pos.original_size * pt_fraction
-                        close_size = min(close_size, pos.size)
-                        if pos.direction == Signal.LONG:
-                            raw = (pt_price - pos.entry_price) * close_size
-                        else:
-                            raw = (pos.entry_price - pt_price) * close_size
-                        maker_fee = SETTINGS.get("maker_fee", 0.0)
-                        comm = (pos.entry_price * close_size + pt_price * close_size) * maker_fee
-                        net = raw - comm
-                        portfolio.capital += net
-                        portfolio.total_commission += comm
-                        portfolio.daily_pnl += net
-                        pos.size -= close_size
-
-                        portfolio.trades.append(MultiTrade(
-                            symbol=sym, direction=pos.direction,
-                            entry_price=pos.entry_price, exit_price=pt_price,
-                            size=close_size, entry_time=pos.entry_time,
-                            exit_time=str(timestamp), exit_reason="PARTIAL_TP",
-                            pnl=net, r_multiple=raw / (pos.r_unit * close_size) if pos.r_unit > 0 else 0,
-                            commission=comm, hold_candles=ti - entry_idx,
-                        ))
-
-                        # SL 이동
-                        if pt_new_sl_r is not None and pos.size > 1e-10:
-                            if pos.direction == Signal.LONG:
-                                new_sl = pos.entry_price + pt_new_sl_r * pos.r_unit
-                                pos.sl_price = max(pos.sl_price, new_sl)
-                            else:
-                                new_sl = pos.entry_price - pt_new_sl_r * pos.r_unit
-                                pos.sl_price = min(pos.sl_price, new_sl)
-                            pos.trailing_state = "trailing"
-
-                        if pos.size <= 1e-10:
-                            portfolio.positions.pop(sym, None)
-
-            # 트레일링 스탑
-            if sym in portfolio.positions:
-                pos, _ = portfolio.positions[sym]
-                update_trailing_stop(pos, row["close"])
 
         # ── 2. 시그널 체크 (활성 심볼만) ──
         signals: list[SignalEvent] = []
@@ -340,7 +287,7 @@ def run_multi_backtest(
             direction = Signal.NO_SIGNAL
             if check_long_conditions(row, prev):
                 direction = Signal.LONG
-            elif check_short_conditions(row, prev):
+            elif SETTINGS.get("short_enabled", True) and check_short_conditions(row, prev):
                 direction = Signal.SHORT
 
             if direction == Signal.NO_SIGNAL:
@@ -383,8 +330,6 @@ def run_multi_backtest(
                     capital=trade_capital,
                     entry_time=str(event.timestamp),
                     entry_index=ti,
-                    partial_tp_config=partial_tp_config,
-                    final_tp_r=final_tp_r,
                 )
 
                 portfolio.open_position(event.symbol, position, ti)

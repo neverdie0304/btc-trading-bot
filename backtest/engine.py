@@ -11,8 +11,6 @@ from strategy.filters import should_filter
 from strategy.position import (
     create_position,
     check_sl_tp_hit,
-    check_partial_tp_hit,
-    update_trailing_stop,
 )
 from backtest.portfolio import Portfolio
 
@@ -23,8 +21,6 @@ def run_backtest(
     df: pd.DataFrame,
     capital: float | None = None,
     pre_signals: pd.Series | None = None,
-    partial_tp_config: list | None = None,
-    final_tp_r: float | None = None,
 ) -> Portfolio:
     """백테스트를 실행한다.
 
@@ -32,10 +28,6 @@ def run_backtest(
         df: OHLCV DataFrame (지표 컬럼 포함 가능).
         capital: 초기 자본 (기본값: settings).
         pre_signals: 사전 계산된 시그널 시리즈 (속도 최적화용).
-        partial_tp_config: 분할 익절 설정 [(r_level, fraction)] 또는
-            [(r_level, fraction, new_sl_r)]. None이면 단일 TP (기본 동작).
-        final_tp_r: 마지막 잔여 물량의 TP를 R 단위로 지정.
-            None이면 settings의 tp_atr_multiplier 사용.
 
     Returns:
         백테스트 결과가 담긴 Portfolio 객체.
@@ -82,7 +74,6 @@ def run_backtest(
 
         # 1. 기존 포지션 SL/TP 체크
         if portfolio.has_position():
-            # SL 먼저 체크 (worst case — 분할익절보다 우선)
             hit, exit_price, reason = check_sl_tp_hit(
                 portfolio.position, high, low
             )
@@ -95,34 +86,6 @@ def run_backtest(
                 )
                 if trade.pnl < 0:
                     daily_losses += 1
-            else:
-                # 분할 익절 체크 (SL 미히트 시)
-                if portfolio.position.tp_levels:
-                    hit_partials = check_partial_tp_hit(
-                        portfolio.position, high, low
-                    )
-                    for pt_price, pt_fraction, pt_new_sl_r in hit_partials:
-                        if portfolio.has_position():
-                            portfolio.partial_close_position(
-                                fraction=pt_fraction,
-                                exit_price=pt_price,
-                                exit_time=str(timestamp),
-                                exit_index=i,
-                            )
-                            # 분할익절 후 SL 이동 (이익 보호)
-                            if pt_new_sl_r is not None and portfolio.has_position():
-                                pos = portfolio.position
-                                if pos.direction == Signal.LONG:
-                                    new_sl = pos.entry_price + pt_new_sl_r * pos.r_unit
-                                    pos.sl_price = max(pos.sl_price, new_sl)
-                                else:
-                                    new_sl = pos.entry_price - pt_new_sl_r * pos.r_unit
-                                    pos.sl_price = min(pos.sl_price, new_sl)
-                                pos.trailing_state = "trailing"
-
-                # 트레일링 스탑 업데이트 (포지션이 남아있으면)
-                if portfolio.has_position():
-                    update_trailing_stop(portfolio.position, close)
 
         # 2. 필터 체크
         candles_since_loss = i - portfolio.last_loss_index
@@ -175,8 +138,6 @@ def run_backtest(
                     capital=portfolio.capital,
                     entry_time=str(timestamp),
                     entry_index=i,
-                    partial_tp_config=partial_tp_config,
-                    final_tp_r=final_tp_r,
                 )
                 portfolio.open_position(position)
                 daily_trades += 1

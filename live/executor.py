@@ -156,7 +156,6 @@ class BaseExecutor(ABC):
         self.state.entry_order_id = None
         self.state.sl_order_id = None
         self.state.tp_order_id = None
-        self.state.partial_tp_order_id = None
         self.state.entry_filled = False
 
     def _cancel_pending_trade_db(self) -> None:
@@ -197,12 +196,7 @@ class PaperExecutor(BaseExecutor):
         self.state.entry_order_id = entry_oid
         self.state.sl_order_id = self._gen_order_id()
 
-        if SETTINGS.get("partial_tp_enabled", False):
-            self.state.partial_tp_order_id = self._gen_order_id()
-            self.state.tp_order_id = None
-        else:
-            self.state.partial_tp_order_id = None
-            self.state.tp_order_id = self._gen_order_id()
+        self.state.tp_order_id = self._gen_order_id()
 
         trade_id = self.db.log_trade(
             timestamp=position.entry_time,
@@ -250,58 +244,6 @@ class PaperExecutor(BaseExecutor):
         self._clear_position_state()
         return True
 
-    async def check_partial_tp(self, high: float, low: float) -> bool:
-        """페이퍼: 분할 TP 히트를 시뮬레이션하고 SL/TP를 재설정한다.
-
-        Returns:
-            분할 TP가 히트된 경우 True.
-        """
-        if (self.state.position is None
-                or self.state.partial_tp_order_id is None
-                or not SETTINGS.get("partial_tp_enabled", False)):
-            return False
-
-        pos = self.state.position
-        partial_fraction = SETTINGS.get("partial_tp_fraction", 0.75)
-        _std_tp_r = SETTINGS["tp_atr_multiplier"] / SETTINGS["sl_atr_multiplier"]
-
-        if pos.direction == Signal.LONG:
-            partial_tp_price = pos.entry_price + _std_tp_r * pos.r_unit
-            hit = high >= partial_tp_price
-        else:
-            partial_tp_price = pos.entry_price - _std_tp_r * pos.r_unit
-            hit = low <= partial_tp_price
-
-        if not hit:
-            return False
-
-        partial_qty = pos.original_size * partial_fraction
-        remaining_qty = pos.original_size - partial_qty
-
-        if pos.direction == Signal.LONG:
-            raw_pnl = (partial_tp_price - pos.entry_price) * partial_qty
-        else:
-            raw_pnl = (pos.entry_price - partial_tp_price) * partial_qty
-        maker_fee = SETTINGS.get("maker_fee", 0.0)
-        commission = (pos.entry_price * partial_qty + partial_tp_price * partial_qty) * maker_fee
-        net_pnl = raw_pnl - commission
-
-        self.state.balance += net_pnl
-        self.state.daily_pnl += net_pnl
-        self.state.partial_tp_order_id = None
-
-        pos.size = remaining_qty
-        pos.sl_price = partial_tp_price
-        pos.trailing_state = "trailing"
-        self.state.sl_order_id = self._gen_order_id()
-        self.state.tp_order_id = self._gen_order_id()
-
-        logger.info(
-            "[PAPER] Partial TP hit: %.2f, PnL=%.2f, remaining=%.6f, SL→%.2f, finalTP=%.2f",
-            partial_tp_price, net_pnl, remaining_qty, pos.sl_price, pos.tp_price,
-        )
-        return True
-
     async def check_sl_tp(self, high: float, low: float) -> bool:
         """봉의 H/L로 SL/TP 히트를 확인하고 청산한다."""
         if self.state.position is None:
@@ -310,16 +252,6 @@ class PaperExecutor(BaseExecutor):
         hit, exit_price, reason = check_sl_tp_hit(self.state.position, high, low)
         if hit:
             await self.close_position(reason, exit_price)
-            return True
-        return False
-
-    async def update_sl_order(self, new_sl: float) -> bool:
-        """SL 가격 업데이트 (페이퍼: 포지션 SL만 변경)."""
-        if self.state.position:
-            old_sl = self.state.position.sl_price
-            self.state.position.sl_price = new_sl
-            self.state.sl_order_id = self._gen_order_id()
-            logger.debug("[PAPER] SL update: %.2f → %.2f", old_sl, new_sl)
             return True
         return False
 
@@ -332,7 +264,6 @@ class PaperExecutor(BaseExecutor):
         """페이퍼 주문 취소 (상태만 정리)."""
         self.state.sl_order_id = None
         self.state.tp_order_id = None
-        self.state.partial_tp_order_id = None
         logger.info("[PAPER] Orders cancelled")
 
     async def emergency_close(self) -> None:
@@ -480,109 +411,34 @@ class LiveExecutor(BaseExecutor):
             logger.exception("SL order failed")
             return None
 
-    async def _place_partial_tp_order(
-        self, position: Position, qty: float, tp_price: float
-    ) -> dict | None:
-        """분할 익절 주문 (TAKE_PROFIT limit — maker fee 0%)."""
-        tp_price_rounded = _round_price(tp_price, self.tick_size)
-        qty_rounded = _round_qty(qty, self.step_size)
-        if qty_rounded <= 0:
-            logger.warning("Partial TP qty 0, order cancelled")
-            return None
-        try:
-            order = await self.client.futures_create_order(
-                symbol=self.symbol,
-                side=_close_side(position.direction),
-                type="TAKE_PROFIT",
-                stopPrice=tp_price_rounded,
-                price=tp_price_rounded,
-                timeInForce="GTC",
-                quantity=qty_rounded,
-                reduceOnly=True,
-            )
-            logger.info("Partial TP order set (LIMIT): %.2f qty=%.6f (orderId=%s)", tp_price_rounded, qty_rounded, _get_order_id(order))
-            return order
-        except Exception:
-            logger.exception("Partial TP order failed")
-            return None
-
-    async def _place_trailing_sl_order(self, position: Position) -> dict | None:
-        """트레일링 SL 주문 (STOP_LIMIT — BE·+0.5R 이상에서 사용)."""
-        stop_price = _round_price(position.sl_price, self.tick_size)
-        qty = _round_qty(position.size, self.step_size)
-        if position.direction == Signal.LONG:
-            limit_price = _round_price(stop_price - _SLIPPAGE_TICKS * self.tick_size, self.tick_size)
-        else:
-            limit_price = _round_price(stop_price + _SLIPPAGE_TICKS * self.tick_size, self.tick_size)
-        try:
-            order = await self.client.futures_create_order(
-                symbol=self.symbol,
-                side=_close_side(position.direction),
-                type="STOP",
-                stopPrice=stop_price,
-                price=limit_price,
-                timeInForce="GTC",
-                quantity=qty,
-                reduceOnly=True,
-            )
-            logger.info("Trailing SL order (STOP_LIMIT): trigger=%.2f, limit=%.2f (orderId=%s)", stop_price, limit_price, _get_order_id(order))
-            return order
-        except Exception:
-            logger.exception("Trailing SL order failed")
-            return None
-
-    # ── 체결 후 SL/TP 설정 (중복 제거) ────────────────────────────
+    # ── 체결 후 SL/TP 설정 ────────────────────────────
 
     async def _setup_sl_tp_after_fill(self, pos: Position, avg_price: float, filled_qty: float) -> None:
-        """진입 체결 후 SL/TP 주문을 설정한다.
-
-        check_pending_entry, cancel_entry_limit, handle_order_update 3곳에서
-        동일하게 사용되는 로직을 통합한다.
-        """
+        """진입 체결 후 SL/TP 주문을 설정한다."""
         pos.entry_price = avg_price
         pos.size = filled_qty
-        pos.original_size = filled_qty
 
-        is_partial_tp = SETTINGS.get("partial_tp_enabled", False)
         _std_tp_r = SETTINGS["tp_atr_multiplier"] / SETTINGS["sl_atr_multiplier"]
 
         if pos.direction == Signal.LONG:
             pos.sl_price = avg_price - pos.r_unit
+            pos.tp_price = avg_price + pos.r_unit * _std_tp_r
         else:
             pos.sl_price = avg_price + pos.r_unit
-
-        if is_partial_tp:
-            final_tp_r = SETTINGS.get("final_tp_r", 4.0)
-            partial_fraction = SETTINGS.get("partial_tp_fraction", 0.75)
-            if pos.direction == Signal.LONG:
-                partial_tp_price = avg_price + _std_tp_r * pos.r_unit
-                pos.tp_price = avg_price + final_tp_r * pos.r_unit
-            else:
-                partial_tp_price = avg_price - _std_tp_r * pos.r_unit
-                pos.tp_price = avg_price - final_tp_r * pos.r_unit
-        else:
-            if pos.direction == Signal.LONG:
-                pos.tp_price = avg_price + pos.r_unit * _std_tp_r
-            else:
-                pos.tp_price = avg_price - pos.r_unit * _std_tp_r
+            pos.tp_price = avg_price - pos.r_unit * _std_tp_r
 
         pos.initial_sl = pos.sl_price
         self.state.entry_filled = True
 
-        # SL 주문 (전체 수량)
+        # SL 주문
         sl_order = await self._place_sl_order(pos)
         if sl_order:
             self.state.sl_order_id = str(_get_order_id(sl_order))
 
-        if is_partial_tp:
-            partial_qty = _round_qty(filled_qty * partial_fraction, self.step_size)
-            partial_order = await self._place_partial_tp_order(pos, partial_qty, partial_tp_price)
-            if partial_order:
-                self.state.partial_tp_order_id = str(_get_order_id(partial_order))
-        else:
-            tp_order = await self._place_tp_order(pos)
-            if tp_order:
-                self.state.tp_order_id = str(_get_order_id(tp_order))
+        # TP 주문
+        tp_order = await self._place_tp_order(pos)
+        if tp_order:
+            self.state.tp_order_id = str(_get_order_id(tp_order))
 
         # DB 업데이트
         if self.state.trades_today:
@@ -707,11 +563,7 @@ class LiveExecutor(BaseExecutor):
                 logger.warning("Existing SL cancel failed, placing new order")
 
         self.state.position.sl_price = new_sl
-
-        if self.state.position.trailing_state != "initial":
-            sl_order = await self._place_trailing_sl_order(self.state.position)
-        else:
-            sl_order = await self._place_sl_order(self.state.position)
+        sl_order = await self._place_sl_order(self.state.position)
 
         if sl_order:
             self.state.sl_order_id = str(_get_order_id(sl_order))
@@ -814,7 +666,6 @@ class LiveExecutor(BaseExecutor):
 
         self.state.sl_order_id = None
         self.state.tp_order_id = None
-        self.state.partial_tp_order_id = None
 
     async def emergency_close(self) -> None:
         """비상 청산: 모든 주문 취소 + 포지션 시장가 청산."""
@@ -846,11 +697,10 @@ class LiveExecutor(BaseExecutor):
         symbol = order.get("s", "")
 
         logger.info(
-            "Order event: id=%s type=%s status=%s symbol=%s (entry=%s filled=%s SL=%s TP=%s PTP=%s)",
+            "Order event: id=%s type=%s status=%s symbol=%s (entry=%s filled=%s SL=%s TP=%s)",
             order_id, order_type, status, symbol,
             self.state.entry_order_id, self.state.entry_filled,
             self.state.sl_order_id, self.state.tp_order_id,
-            self.state.partial_tp_order_id,
         )
 
         if status == "FILLED":
@@ -867,89 +717,14 @@ class LiveExecutor(BaseExecutor):
                 pos = self.state.position
                 await self._setup_sl_tp_after_fill(pos, avg_price, filled_qty)
 
-                is_partial = SETTINGS.get("partial_tp_enabled", False)
-                if is_partial:
-                    _std_tp_r = SETTINGS["tp_atr_multiplier"] / SETTINGS["sl_atr_multiplier"]
-                    if pos.direction == Signal.LONG:
-                        ptp = avg_price + _std_tp_r * pos.r_unit
-                    else:
-                        ptp = avg_price - _std_tp_r * pos.r_unit
-                    logger.info(
-                        ">>> Entry LIMIT filled (partialTP): %s @ %.4f, qty=%.6f, SL=%.4f, partialTP=%.4f, finalTP=%.4f",
-                        pos.direction.value, avg_price, filled_qty,
-                        pos.sl_price, ptp, pos.tp_price,
-                    )
-                else:
-                    logger.info(
-                        ">>> Entry LIMIT filled: %s @ %.4f, qty=%.6f, SL=%.4f, TP=%.4f",
-                        pos.direction.value, avg_price, filled_qty,
-                        pos.sl_price, pos.tp_price,
-                    )
+                logger.info(
+                    ">>> Entry LIMIT filled: %s @ %.4f, qty=%.6f, SL=%.4f, TP=%.4f",
+                    pos.direction.value, avg_price, filled_qty,
+                    pos.sl_price, pos.tp_price,
+                )
                 return
 
             if not self.state.entry_filled:
-                return
-
-            # ── 1.5 분할 TP 체결
-            is_partial_tp = (
-                self.state.partial_tp_order_id is not None
-                and order_id == self.state.partial_tp_order_id
-                and self.state.position is not None
-            )
-            if is_partial_tp:
-                pos = self.state.position
-                partial_fraction = SETTINGS.get("partial_tp_fraction", 0.75)
-                partial_qty = _round_qty(pos.original_size * partial_fraction, self.step_size)
-                remaining_qty = _round_qty(pos.original_size - partial_qty, self.step_size)
-
-                if pos.direction == Signal.LONG:
-                    raw_pnl = (avg_price - pos.entry_price) * partial_qty
-                else:
-                    raw_pnl = (pos.entry_price - avg_price) * partial_qty
-                maker_fee = SETTINGS.get("maker_fee", 0.0)
-                commission = (pos.entry_price * partial_qty + avg_price * partial_qty) * maker_fee
-                net_pnl = raw_pnl - commission
-
-                self.state.balance += net_pnl
-                self.state.daily_pnl += net_pnl
-                self.state.partial_tp_order_id = None
-
-                logger.info(
-                    ">>> Partial TP filled: %.4f, qty=%.6f (%.0f%%), PnL=%.2f — SL→%.4f, remaining %.6f→finalTP=%.4f",
-                    avg_price, partial_qty, partial_fraction * 100, net_pnl,
-                    avg_price, remaining_qty, pos.tp_price,
-                )
-
-                # 기존 SL 취소
-                if self.state.sl_order_id:
-                    try:
-                        await self.client.futures_cancel_order(
-                            symbol=self.symbol, orderId=self.state.sl_order_id,
-                        )
-                    except Exception:
-                        logger.warning("Existing SL cancel failed after partial TP — continuing")
-                    self.state.sl_order_id = None
-
-                pos.size = remaining_qty
-                pos.sl_price = avg_price
-                pos.trailing_state = "trailing"
-
-                sl_order = await self._place_sl_order(pos)
-                if sl_order:
-                    self.state.sl_order_id = str(_get_order_id(sl_order))
-
-                tp_order = await self._place_tp_order(pos)
-                if tp_order:
-                    self.state.tp_order_id = str(_get_order_id(tp_order))
-
-                if self.state.trades_today:
-                    self.db.update_trade_entry(
-                        trade_id=self.state.trades_today[-1].trade_db_id,
-                        entry_price=pos.entry_price,
-                        size=remaining_qty,
-                        sl_price=pos.sl_price,
-                        tp_price=pos.tp_price,
-                    )
                 return
 
             # ── 2. TP 체결
@@ -958,10 +733,9 @@ class LiveExecutor(BaseExecutor):
                 or (
                     order_type == "TAKE_PROFIT"
                     and self.state.position is not None
-                    and order_id != self.state.partial_tp_order_id
                 )
             )
-            # ── 3. SL / 트레일링 SL 체결
+            # ── 3. SL 체결
             is_sl = (
                 order_id == self.state.sl_order_id
                 or (order_type in ("STOP_MARKET", "STOP") and self.state.position is not None)
@@ -977,9 +751,7 @@ class LiveExecutor(BaseExecutor):
             elif is_sl:
                 pos = self.state.position
                 if pos:
-                    is_trailing = pos.trailing_state != "initial"
-                    reason = "TRAILING_SL" if is_trailing else "SL"
-                    self._record_exit(pos, avg_price, reason, order_id)
+                    self._record_exit(pos, avg_price, "SL", order_id)
                     self._clear_position_state()
                     await self.cancel_all_orders()
 

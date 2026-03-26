@@ -122,8 +122,6 @@ class ScannerState:
                         "initial_sl": pos.initial_sl,
                         "entry_time": pos.entry_time,
                         "r_unit": pos.r_unit,
-                        "trailing_state": pos.trailing_state,
-                        "original_size": pos.original_size,
                     }
                     for sym, pos in self.positions.items()
                 },
@@ -184,8 +182,6 @@ class ScannerState:
                     initial_sl=pos_data["initial_sl"],
                     entry_time=pos_data.get("entry_time", ""),
                     r_unit=pos_data.get("r_unit", 0.0),
-                    trailing_state=pos_data.get("trailing_state", "initial"),
-                    original_size=pos_data.get("original_size", pos_data["size"]),
                 )
 
             # 심볼 상태 복원

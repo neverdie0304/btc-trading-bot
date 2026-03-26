@@ -29,6 +29,7 @@ logging.basicConfig(
         logging.FileHandler("data/scanner.log"),
     ],
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 

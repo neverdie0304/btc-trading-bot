@@ -21,7 +21,6 @@ from strategy.filters import (
 from strategy.position import (
     create_position,
     check_sl_tp_hit,
-    update_trailing_stop,
     calculate_position_size,
 )
 
@@ -203,19 +202,3 @@ class TestPosition:
         hit, _, _ = check_sl_tp_hit(pos, 42100, 41950)
         assert hit is False
 
-    def test_trailing_stop_break_even(self) -> None:
-        """1R 도달 시 BE로 이동 확인."""
-        pos = create_position(Signal.LONG, 42000, 100, 10000)
-        r_unit = _SL_MULT * 100  # 120
-        update_trailing_stop(pos, 42000 + r_unit + 10)
-        assert pos.sl_price == pytest.approx(42000)
-        assert pos.trailing_state == "break_even"
-
-    def test_trailing_stop_step(self) -> None:
-        """1.5R 도달 시 +0.5R로 이동 확인."""
-        pos = create_position(Signal.LONG, 42000, 100, 10000)
-        r_unit = _SL_MULT * 100  # 120
-        update_trailing_stop(pos, 42000 + r_unit + 10)
-        update_trailing_stop(pos, 42000 + 1.5 * r_unit + 10)
-        assert pos.sl_price == pytest.approx(42000 + 0.5 * r_unit)
-        assert pos.trailing_state == "trailing"

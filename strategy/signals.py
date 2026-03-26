@@ -173,7 +173,7 @@ def generate_signals(df: pd.DataFrame) -> pd.Series:
 
         if check_long_conditions(row, prev_row):
             signals.iloc[i] = Signal.LONG
-        elif check_short_conditions(row, prev_row):
+        elif SETTINGS.get("short_enabled", True) and check_short_conditions(row, prev_row):
             signals.iloc[i] = Signal.SHORT
 
     long_count = (signals == Signal.LONG).sum()

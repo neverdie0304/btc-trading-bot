@@ -48,7 +48,6 @@ class LiveState:
     entry_order_id: str | None = None
     sl_order_id: str | None = None
     tp_order_id: str | None = None
-    partial_tp_order_id: str | None = None  # 분할 익절 주문 ID (체결 후 None 초기화)
 
     # 추적
     consecutive_losses: int = 0
@@ -105,18 +104,15 @@ class LiveState:
                 "direction": self.position.direction.value,
                 "entry_price": self.position.entry_price,
                 "size": self.position.size,
-                "original_size": self.position.original_size,
                 "sl_price": self.position.sl_price,
                 "tp_price": self.position.tp_price,
                 "initial_sl": self.position.initial_sl,
                 "entry_time": self.position.entry_time,
                 "r_unit": self.position.r_unit,
-                "trailing_state": self.position.trailing_state,
             }
             state_dict["entry_order_id"] = self.entry_order_id
             state_dict["sl_order_id"] = self.sl_order_id
             state_dict["tp_order_id"] = self.tp_order_id
-            state_dict["partial_tp_order_id"] = self.partial_tp_order_id
         else:
             state_dict["position"] = None
 
@@ -163,13 +159,10 @@ class LiveState:
                 initial_sl=pos_data["initial_sl"],
                 entry_time=pos_data.get("entry_time", ""),
                 r_unit=pos_data.get("r_unit", 0),
-                trailing_state=pos_data.get("trailing_state", "initial"),
-                original_size=pos_data.get("original_size", pos_data["size"]),
             )
             state.entry_order_id = d.get("entry_order_id")
             state.sl_order_id = d.get("sl_order_id")
             state.tp_order_id = d.get("tp_order_id")
-            state.partial_tp_order_id = d.get("partial_tp_order_id")
             logger.info(
                 "Position restored: %s @ %.2f, SL=%.2f, TP=%.2f",
                 state.position.direction.value,
