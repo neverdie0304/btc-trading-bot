@@ -260,6 +260,14 @@ class PaperExecutor(BaseExecutor):
         self._clear_position_state()
         logger.info("[PAPER] Entry order cancelled")
 
+    async def update_sl_order(self, new_sl: float) -> bool:
+        """페이퍼 SL 업데이트."""
+        if self.state.position is None:
+            return False
+        self.state.position.sl_price = new_sl
+        logger.info("[PAPER] SL updated to %g", new_sl)
+        return True
+
     async def cancel_all_orders(self) -> None:
         """페이퍼 주문 취소 (상태만 정리)."""
         self.state.sl_order_id = None

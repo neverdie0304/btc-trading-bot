@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from config.settings import SETTINGS
 from strategy.signals import Signal, compute_indicators, check_long_conditions, check_short_conditions
 from strategy.filters import should_filter
 from scanner.config import SCANNER_SETTINGS
@@ -94,7 +95,7 @@ class SignalEngine:
         direction = Signal.NO_SIGNAL
         if check_long_conditions(latest, prev):
             direction = Signal.LONG
-        elif check_short_conditions(latest, prev):
+        elif SETTINGS.get("short_enabled", True) and check_short_conditions(latest, prev):
             direction = Signal.SHORT
 
         if direction == Signal.NO_SIGNAL:
