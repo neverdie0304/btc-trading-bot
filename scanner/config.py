@@ -18,9 +18,9 @@ SCANNER_SETTINGS: dict = {
     "min_atr_pct": 1.0,           # ATR/Price >= 1.0% 코인만 진입 (None=필터 OFF)
 
     # ── 포지션 관리 ──
-    "max_concurrent_positions": 3,
-    "max_capital_per_position_pct": 0.33,  # 포지션당 최대 자본 33%
-    "max_total_exposure_pct": 0.80,        # 총 노출 한도 80%
+    "max_concurrent_positions": 1,
+    "max_capital_per_position_pct": 0.95,  # 포지션당 최대 자본 95%
+    "max_total_exposure_pct": 1.00,        # 총 노출 한도 100%
 
     # ── 리스크 ──
     "daily_max_loss_pct": -5.0,            # 일일 최대 손실 -5%
