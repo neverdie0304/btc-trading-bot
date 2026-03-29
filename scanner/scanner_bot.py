@@ -221,9 +221,12 @@ class ScannerBot:
 
         self.state.increment_candle(symbol)
 
-        # 포지션이 있는 심볼: paper 모드 SL/TP 체크
-        if symbol in self.state.positions and self.mode == "paper":
-            await self._check_paper_sl_tp(symbol, df)
+        # 포지션이 있는 심볼: SL/TP 체크
+        if symbol in self.state.positions:
+            if self.mode == "paper":
+                await self._check_paper_sl_tp(symbol, df)
+            elif self.mode == "live":
+                await self._check_live_positions()
 
         # 시그널 체크
         sym_state = self.state.get_symbol_state(symbol)
@@ -313,6 +316,11 @@ class ScannerBot:
     async def _open_position(self, event: SignalEvent) -> None:
         """시그널 이벤트 기반으로 포지션을 연다."""
         symbol = event.symbol
+
+        # 라이브 모드: 진입 전 실제 잔고 조회
+        if self.mode == "live":
+            await self._sync_balance()
+
         capital = self.risk_manager.get_capital_for_trade(
             self.state.balance, self.state.positions,
         )
@@ -450,6 +458,88 @@ class ScannerBot:
         except Exception:
             logger.exception("Balance query failed, using config value")
 
+    async def _sync_balance(self) -> float:
+        """Binance에서 실제 잔고를 가져와 state를 업데이트한다."""
+        try:
+            real_balance = 0.0
+            account = await self.client.futures_account()
+            for asset in account.get("assets", []):
+                if asset["asset"] in ("USDT", "USDC"):
+                    bal = float(asset.get("walletBalance", 0))
+                    if bal > 0:
+                        real_balance += bal
+            if real_balance > 0:
+                old = self.state.balance
+                self.state.balance = real_balance
+                if abs(old - real_balance) > 0.01:
+                    logger.info("[SYNC] Balance: $%.2f → $%.2f", old, real_balance)
+            return real_balance
+        except Exception:
+            logger.exception("Balance sync failed")
+            return self.state.balance
+
+    async def _check_live_positions(self) -> None:
+        """라이브 모드에서 거래소 포지션 상태를 확인하고 청산된 포지션을 처리한다."""
+        if self.mode != "live" or not self.state.positions:
+            return
+
+        for symbol in list(self.state.positions.keys()):
+            try:
+                exchange_positions = await self.client.futures_position_information(
+                    symbol=symbol,
+                )
+                amt = 0.0
+                for ep in exchange_positions:
+                    amt = float(ep.get("positionAmt", 0))
+                    if amt != 0:
+                        break
+
+                if amt == 0:
+                    # 거래소에서 포지션이 닫혔음 → 실제 잔고로 PnL 계산
+                    pos = self.state.positions[symbol]
+                    balance_before = self.state.balance
+                    real_balance = await self._sync_balance()
+                    real_pnl = real_balance - balance_before
+
+                    self.state.close_position(symbol, 0)  # 수동 PnL 안 더함
+                    self.state.balance = real_balance      # 실제 잔고로 덮어쓰기
+                    self.state.daily_pnl += real_pnl
+                    self.risk_manager.update_daily_pnl(real_pnl)
+                    self.state.save_to_db("data/scanner_trades.db")
+
+                    # DB에 거래 기록 업데이트
+                    r_mult = real_pnl / (pos.r_unit * pos.size) if pos.r_unit * pos.size > 0 else 0
+                    reason = "TP" if real_pnl > 0 else "SL"
+
+                    if self.db and self._live_states.get(symbol):
+                        ls = self._live_states[symbol]
+                        if ls.trades_today:
+                            self.db.update_trade_exit(
+                                trade_id=ls.trades_today[-1].trade_db_id,
+                                exit_price=0,
+                                exit_reason=reason,
+                                pnl=real_pnl,
+                                commission=0,
+                                r_multiple=r_mult,
+                            )
+
+                    logger.info(
+                        "[LIVE EXIT] %s %s closed on exchange | Real PnL=$%.2f (%.1fR) | Balance=$%.2f",
+                        symbol, pos.direction.value, real_pnl, r_mult, real_balance,
+                    )
+                    await self.telegram.notify_exit(
+                        symbol=symbol, direction=pos.direction.value,
+                        exit_price=0, pnl=real_pnl, r_multiple=r_mult,
+                        reason=reason, balance=real_balance,
+                    )
+
+                    # executor/live_state 정리
+                    if symbol in self._executors:
+                        self._executors[symbol]._clear_position_state()
+
+            except Exception:
+                logger.exception("[LIVE] Position check failed: %s", symbol)
+
     # ── 백그라운드 태스크 ─────────────────────────────────
 
     async def _symbol_refresh_loop(self) -> None:
@@ -543,6 +633,12 @@ class ScannerBot:
         while not self._shutdown:
             try:
                 await asyncio.sleep(300)
+
+                # 라이브 모드: 실제 잔고 동기화 + 포지션 체크
+                if self.mode == "live":
+                    await self._sync_balance()
+                    await self._check_live_positions()
+
                 self._log_status()
                 self.state.save_to_db("data/scanner_trades.db")
             except asyncio.CancelledError:
