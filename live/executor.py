@@ -468,7 +468,11 @@ class LiveExecutor(BaseExecutor):
             logger.warning("Order qty 0, entry cancelled")
             return False
 
-        limit_price = _round_price(position.entry_price, self.tick_size)
+        # 체결 확률을 높이기 위해 LONG은 한 틱 위, SHORT은 한 틱 아래
+        if position.direction == Signal.LONG:
+            limit_price = _round_price(position.entry_price + self.tick_size, self.tick_size)
+        else:
+            limit_price = _round_price(position.entry_price - self.tick_size, self.tick_size)
 
         # 트레이드별 동적 레버리지 설정
         if self.state.balance > 0:

@@ -246,12 +246,30 @@ class ScannerBot:
                 self._batch_task = asyncio.create_task(self._process_signal_batch())
 
     async def _on_price_update(self, symbol: str, kline: dict) -> None:
-        """실시간 가격 업데이트 → SL 히트 체크."""
+        """실시간 가격 업데이트 → SL 히트 체크 / 미체결 LIMIT TP 도달 취소."""
         if self._shutdown or symbol not in self.state.positions:
             return
 
         price = float(kline["c"])
         pos = self.state.positions[symbol]
+
+        # 라이브 모드: 미체결 LIMIT 주문 — 가격이 TP에 도달하면 즉시 취소
+        if self.mode == "live":
+            ls = self._live_states.get(symbol)
+            if ls and not ls.entry_filled:
+                tp_hit = False
+                if pos.direction == Signal.LONG and price >= pos.tp_price:
+                    tp_hit = True
+                elif pos.direction == Signal.SHORT and price <= pos.tp_price:
+                    tp_hit = True
+                if tp_hit:
+                    executor = self._executors.get(symbol)
+                    if executor:
+                        logger.info("[LIVE] %s price reached TP without fill, cancelling LIMIT", symbol)
+                        await executor.cancel_entry_limit()
+                        self.state.positions.pop(symbol, None)
+                        self.state.save_to_db("data/scanner_trades.db")
+                return
 
         # Paper 모드: SL 히트 체크
         if self.mode == "paper":
@@ -340,21 +358,31 @@ class ScannerBot:
         if success:
             self.state.open_position(symbol, position)
             self.state.save_to_db("data/scanner_trades.db")
-            logger.info(
-                ">>> [ENTRY] %s %s @ %s | Size=%.4f | SL=%s | TP=%s | Score=%.3f",
-                symbol, event.direction.value, _fmt_price(event.close),
-                position.size, _fmt_price(position.sl_price),
-                _fmt_price(position.tp_price), event.score,
-            )
-            await self.telegram.notify_entry(
-                symbol=symbol,
-                direction=event.direction.value,
-                entry_price=event.close,
-                size=position.size,
-                sl_price=position.sl_price,
-                tp_price=position.tp_price,
-                score=event.score,
-            )
+
+            if self.mode == "paper":
+                logger.info(
+                    ">>> [ENTRY] %s %s @ %s | Size=%.4f | SL=%s | TP=%s | Score=%.3f",
+                    symbol, event.direction.value, _fmt_price(event.close),
+                    position.size, _fmt_price(position.sl_price),
+                    _fmt_price(position.tp_price), event.score,
+                )
+                await self.telegram.notify_entry(
+                    symbol=symbol,
+                    direction=event.direction.value,
+                    entry_price=event.close,
+                    size=position.size,
+                    sl_price=position.sl_price,
+                    tp_price=position.tp_price,
+                    score=event.score,
+                )
+            else:
+                # 라이브: LIMIT 주문 배치됨 (아직 미체결)
+                logger.info(
+                    ">>> [ORDER] %s %s LIMIT @ %s | Size=%.4f | SL=%s | TP=%s | Score=%.3f",
+                    symbol, event.direction.value, _fmt_price(event.close),
+                    position.size, _fmt_price(position.sl_price),
+                    _fmt_price(position.tp_price), event.score,
+                )
 
     # ── Paper 모드 SL/TP ─────────────────────────────────
 
@@ -485,6 +513,42 @@ class ScannerBot:
 
         for symbol in list(self.state.positions.keys()):
             try:
+                # 진입 LIMIT이 아직 미체결인지 확인
+                ls = self._live_states.get(symbol)
+                executor = self._executors.get(symbol)
+                if ls and not ls.entry_filled:
+                    # LIMIT 주문 체결 여부를 REST로 확인
+                    if executor and hasattr(executor, 'check_pending_entry'):
+                        filled = await executor.check_pending_entry()
+                        if filled:
+                            # 체결됨 → 텔레그램 알림
+                            pos = self.state.positions[symbol]
+                            logger.info(
+                                ">>> [ENTRY FILLED] %s %s @ %s | Size=%.4f",
+                                symbol, pos.direction.value,
+                                _fmt_price(pos.entry_price), pos.size,
+                            )
+                            await self.telegram.notify_entry(
+                                symbol=symbol,
+                                direction=pos.direction.value,
+                                entry_price=pos.entry_price,
+                                size=pos.size,
+                                sl_price=pos.sl_price,
+                                tp_price=pos.tp_price,
+                                score=0,
+                            )
+                        else:
+                            # 아직 미체결 → 2봉(10분) 이상 지나면 취소
+                            candle_count = ls.candle_count if hasattr(ls, 'candle_count') else 0
+                            entry_candle = ls.entry_limit_candle if hasattr(ls, 'entry_limit_candle') else 0
+                            if candle_count - entry_candle >= 2:
+                                logger.info("[LIVE] %s entry LIMIT expired, cancelling", symbol)
+                                await executor.cancel_entry_limit()
+                                self.state.positions.pop(symbol, None)
+                                self.state.save_to_db("data/scanner_trades.db")
+                    continue
+
+                # 체결된 포지션: 거래소에서 아직 열려있는지 확인
                 exchange_positions = await self.client.futures_position_information(
                     symbol=symbol,
                 )
@@ -511,8 +575,7 @@ class ScannerBot:
                     r_mult = real_pnl / (pos.r_unit * pos.size) if pos.r_unit * pos.size > 0 else 0
                     reason = "TP" if real_pnl > 0 else "SL"
 
-                    if self.db and self._live_states.get(symbol):
-                        ls = self._live_states[symbol]
+                    if self.db and ls:
                         if ls.trades_today:
                             self.db.update_trade_exit(
                                 trade_id=ls.trades_today[-1].trade_db_id,
@@ -534,8 +597,8 @@ class ScannerBot:
                     )
 
                     # executor/live_state 정리
-                    if symbol in self._executors:
-                        self._executors[symbol]._clear_position_state()
+                    if executor:
+                        executor._clear_position_state()
 
             except Exception:
                 logger.exception("[LIVE] Position check failed: %s", symbol)
