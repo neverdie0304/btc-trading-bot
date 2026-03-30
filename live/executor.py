@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 
 def _round_price(price: float, tick_size: float = 0.10) -> float:
     """가격을 틱 사이즈에 맞춰 반올림한다."""
-    return round(price / tick_size) * tick_size
+    decimals = max(0, -int(math.log10(tick_size))) if tick_size > 0 else 8
+    return round(round(price / tick_size) * tick_size, decimals)
 
 
 def _round_qty(qty: float, step_size: float = 0.001) -> float:
@@ -443,10 +444,19 @@ class LiveExecutor(BaseExecutor):
         if sl_order:
             self.state.sl_order_id = str(_get_order_id(sl_order))
 
-        # TP 주문
+        # TP 주문 (실패 시 재시도)
         tp_order = await self._place_tp_order(pos)
         if tp_order:
             self.state.tp_order_id = str(_get_order_id(tp_order))
+        else:
+            logger.warning("TP order failed on first attempt, retrying in 1s...")
+            import asyncio
+            await asyncio.sleep(1)
+            tp_order = await self._place_tp_order(pos)
+            if tp_order:
+                self.state.tp_order_id = str(_get_order_id(tp_order))
+            else:
+                logger.error("TP order failed twice! Position %s has NO TP protection", self.symbol)
 
         # DB 업데이트
         if self.state.trades_today:
