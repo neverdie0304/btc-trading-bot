@@ -596,8 +596,9 @@ class ScannerBot:
                         reason=reason, balance=real_balance,
                     )
 
-                    # executor/live_state 정리
+                    # 잔여 주문 취소 + executor/live_state 정리
                     if executor:
+                        await executor.cancel_all_orders()
                         executor._clear_position_state()
 
             except Exception:
